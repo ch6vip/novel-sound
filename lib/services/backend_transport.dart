@@ -312,81 +312,91 @@ class RustBackendTransport implements BackendTransport {
     _attempt = attempt;
     attempt.future =
         _serialize(() async {
-          void checkCurrent() {
-            if (attempt.retired || !identical(_attempt, attempt)) {
-              throw StateError('backend start retired');
-            }
-          }
+              void checkCurrent() {
+                if (attempt.retired || !identical(_attempt, attempt)) {
+                  throw StateError('backend start retired');
+                }
+              }
 
-          checkCurrent();
-          await ensureRuntime();
-          checkCurrent();
-          final previous = _session;
-          if (previous != null && previous.retiring) {
-            await _retire(previous);
-            checkCurrent();
-          }
-          final shared = _session;
-          if (shared != null) {
-            shared.participants.add(attempt);
-            attempt.session = shared;
-            _publish(shared);
-            return 'running';
-          }
-          // P1-2: provision the device-pool encryption key before init, so the
-          // Rust core reads an encrypted pool file on its first load. A null
-          // key (secure storage unavailable) keeps the old plaintext behavior;
-          // a provisioning failure never blocks startup.
-          final poolKey = await SecureKeyProvider().devicePoolKey();
-          checkCurrent();
-          if (poolKey == null &&
-              defaultTargetPlatform == TargetPlatform.linux) {
-            throw StateError('Linux 设备池密钥不可用');
-          }
-          if (poolKey != null) {
-            try {
-              await rust.setDevicePoolKey(key: poolKey);
-            } catch (_) {
-              if (defaultTargetPlatform == TargetPlatform.linux) rethrow;
-              // Keep starting: the pool falls back to plaintext + a warning.
-            }
-            checkCurrent();
-          }
-          final session = _CoreSession()..participants.add(attempt);
-          attempt.session = session;
-          _session = session;
-          try {
-            final result = await rust.init(
-              configPath: configPath,
-              poolPath: poolPath,
-              filterPath: filterPath,
-              runtimeDir: runtimeDir,
-              port: listenPort ?? port,
-              lanShare: lanShare,
-              mockUpstreamOrigin: mockUpstreamOrigin,
-            );
-            checkCurrent();
-            if (result != 'running') {
-              throw StateError('Rust core failed: $result');
-            }
-            session.baseUrl = await rust.baseUrl();
-            checkCurrent();
-            session.capability = await rust.sessionCapability();
-            checkCurrent();
-            _publish(session);
-            return result;
-          } catch (_) {
-            attempt.retired = true;
-            session.participants.remove(attempt);
-            // This cleanup remains inside the operation that allocated the core.
-            await _retire(session);
-            rethrow;
-          }
-        }).whenComplete(() {
-          if (identical(_attempt, attempt) && !_coreRunning) {
-            attempt.retired = true;
-          }
-        });
+              checkCurrent();
+              await ensureRuntime();
+              checkCurrent();
+              final previous = _session;
+              if (previous != null && previous.retiring) {
+                await _retire(previous);
+                checkCurrent();
+              }
+              final shared = _session;
+              if (shared != null) {
+                shared.participants.add(attempt);
+                attempt.session = shared;
+                _publish(shared);
+                attempt.ready.complete();
+                return 'running';
+              }
+              // P1-2: provision the device-pool encryption key before init, so the
+              // Rust core reads an encrypted pool file on its first load. A null
+              // key (secure storage unavailable) keeps the old plaintext behavior;
+              // a provisioning failure never blocks startup.
+              final poolKey = await SecureKeyProvider().devicePoolKey();
+              checkCurrent();
+              if (poolKey == null &&
+                  defaultTargetPlatform == TargetPlatform.linux) {
+                throw StateError('Linux 设备池密钥不可用');
+              }
+              if (poolKey != null) {
+                try {
+                  await rust.setDevicePoolKey(key: poolKey);
+                } catch (_) {
+                  if (defaultTargetPlatform == TargetPlatform.linux) rethrow;
+                  // Keep starting: the pool falls back to plaintext + a warning.
+                }
+                checkCurrent();
+              }
+              final session = _CoreSession()..participants.add(attempt);
+              attempt.session = session;
+              _session = session;
+              try {
+                final result = await rust.init(
+                  configPath: configPath,
+                  poolPath: poolPath,
+                  filterPath: filterPath,
+                  runtimeDir: runtimeDir,
+                  port: listenPort ?? port,
+                  lanShare: lanShare,
+                  mockUpstreamOrigin: mockUpstreamOrigin,
+                );
+                checkCurrent();
+                if (result != 'running') {
+                  throw StateError('Rust core failed: $result');
+                }
+                session.baseUrl = await rust.baseUrl();
+                checkCurrent();
+                session.capability = await rust.sessionCapability();
+                checkCurrent();
+                _publish(session);
+                attempt.ready.complete();
+                return result;
+              } catch (_) {
+                attempt.retired = true;
+                session.participants.remove(attempt);
+                // This cleanup remains inside the operation that allocated the core.
+                await _retire(session);
+                rethrow;
+              }
+            })
+            .catchError((Object error) {
+              // 启动失败也要唤醒等待「核心就绪」的请求：否则它们会一直等到
+              // 自己的超时，冷启动的首页就会一直转圈而不是立刻报失败。
+              attempt.failure = error;
+              throw error;
+            })
+            .whenComplete(() {
+              if (identical(_attempt, attempt) && !_coreRunning) {
+                attempt.retired = true;
+              }
+              if (!attempt.ready.isCompleted) attempt.ready.complete();
+            });
     return attempt.future;
   }
 
@@ -411,6 +421,12 @@ class RustBackendTransport implements BackendTransport {
     _capability = '';
     _httpFallback.capability = '';
     attempt?.retired = true;
+    // 停掉时也要唤醒等待「核心就绪」的请求：让它们立刻拿到失败，而不是
+    // 各自等到超时。
+    if (attempt != null && !attempt.ready.isCompleted) {
+      attempt.failure = StateError('backend stopped');
+      attempt.ready.complete();
+    }
     final session = attempt?.session ?? _retiringSession;
     if (attempt == null && session == null) return Future<void>.value();
     if (session != null) {
@@ -444,13 +460,50 @@ class RustBackendTransport implements BackendTransport {
       throw BackendRequestAborted('请求已取消');
     }
     if (!_coreRunning) {
-      return _httpFallback.send(
-        method,
-        url,
-        body: body,
-        timeout: timeout,
-        request: request,
+      final pendingAttempt = _attempt;
+      // 核心正在启动：首个请求不该立刻撞上一个还没监听的端口（那会让冷启动
+      // 的首页首帧直接失败，而不是随核心就绪自动落位）。排队等到核心就绪，
+      // 等待预算算进本次请求的超时里——核心一直起不来时按超时失败（#318）。
+      if (pendingAttempt == null ||
+          pendingAttempt.retired ||
+          pendingAttempt.ready.isCompleted) {
+        return _httpFallback.send(
+          method,
+          url,
+          body: body,
+          timeout: timeout,
+          request: request,
+        );
+      }
+      final budget = timeout ?? const Duration(seconds: 20);
+      final clock = Stopwatch()..start();
+      await pendingAttempt.ready.future.timeout(
+        budget,
+        onTimeout: () =>
+            throw BackendRequestAborted('本地服务启动超时', timedOut: true),
       );
+      final failure = pendingAttempt.failure;
+      if (failure != null) {
+        throw BackendRequestAborted('本地服务启动失败：$failure');
+      }
+      if (request != null && request.isCancelled) {
+        throw BackendRequestAborted('请求已取消');
+      }
+      final remaining = budget - clock.elapsed;
+      if (remaining <= Duration.zero) {
+        throw BackendRequestAborted('请求超时', timedOut: true);
+      }
+      timeout = remaining;
+      if (!_coreRunning) {
+        // 核心没能起来：保持既有回落，交给上层走错误态。
+        return _httpFallback.send(
+          method,
+          url,
+          body: body,
+          timeout: timeout,
+          request: request,
+        );
+      }
     }
 
     final attempt = _attempt;
@@ -504,6 +557,13 @@ class _CoreAttempt {
   late Future<String> future;
   bool retired = false;
   _CoreSession? session;
+
+  /// 就绪信号：核心起来时完成，启动失败或被停掉时同样完成——等待方据此
+  /// 知道「不会再有核心了」，不必干等到自己的超时。
+  final Completer<void> ready = Completer<void>();
+
+  /// 启动失败的原因。核心没起来时用它告诉等待方「为什么等不到」。
+  Object? failure;
 }
 
 class _CoreSession {
