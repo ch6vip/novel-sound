@@ -11,6 +11,7 @@ import '../models/media_item.dart';
 import '../models/media_id.dart';
 import '../models/search_discovery.dart';
 import '../services/api_client.dart';
+import '../services/search_filters.dart';
 import '../services/app_theme_style.dart';
 import '../services/backend_transport.dart';
 import '../services/desktop_platform.dart';
@@ -161,6 +162,10 @@ class SearchRoute<T> extends PageRouteBuilder<T> {
 
 class SearchPage extends StatefulWidget {
   final String? initialQuery;
+
+  /// 分类入口带进来的分类词（如「都市」）。设置后结果按作品的分类标签过滤，
+  /// 而不是把分类词当关键词只匹配书名。
+  final String? initialTag;
   final SearchPageLoader? searchLoader;
   final Future<MediaItem?> Function(String id)? idSearchLoader;
   final SearchHistoryRepository? historyStore;
@@ -181,6 +186,7 @@ class SearchPage extends StatefulWidget {
   const SearchPage({
     super.key,
     this.initialQuery,
+    this.initialTag,
     this.searchLoader,
     this.idSearchLoader,
     this.historyStore,
@@ -227,6 +233,9 @@ class _SearchPageState extends State<SearchPage> {
   int _tabIndex = 0;
   int _requestGeneration = 0;
   double _minimumScore = 0;
+
+  /// 状态 / 字数 / 分类词的二次筛选。
+  SearchFilters _filters = const SearchFilters();
 
   /// Upstream search results are always `NovelRow` lists; the cover grid is
   /// an opt-in that fqapp persists.
@@ -312,7 +321,11 @@ class _SearchPageState extends State<SearchPage> {
     unawaited(_loadLayout());
     unawaited(_loadMinimumScore());
     unawaited(_loadHotSearch());
-    final initial = widget.initialQuery?.trim() ?? '';
+    final tag = widget.initialTag?.trim() ?? '';
+    if (tag.isNotEmpty) _filters = _filters.copyWith(tag: tag);
+    final initial = widget.initialQuery?.trim().isNotEmpty == true
+        ? widget.initialQuery!.trim()
+        : tag;
     if (initial.isNotEmpty) {
       _ctrl.text = initial;
       _draft = initial;
@@ -415,6 +428,10 @@ class _SearchPageState extends State<SearchPage> {
       _minimumScore == 0 ||
       (item.score != null && item.score! >= _minimumScore);
 
+  /// 二次筛选：评分 + 分类标签 + 连载状态 + 字数。只作用于已加载的结果。
+  bool _matchesFilters(MediaItem item) =>
+      _matchesScore(item) && _filters.matches(item);
+
   /// 结果条目的来源限定身份。书旗和番茄各自有自己的 id 命名空间，不能只按
   /// id 或 kind 匹配。
   String _resultIdentity(MediaItem item) =>
@@ -432,7 +449,7 @@ class _SearchPageState extends State<SearchPage> {
     if (_query.isEmpty || _refining || _showSuggestions) return const [];
     final feed = _feeds[_tabIndex];
     if (!feed.initialized || feed.items.isEmpty) return const [];
-    return feed.items.where(_matchesScore).toList(growable: false);
+    return feed.items.where(_matchesFilters).toList(growable: false);
   }
 
   RenderBox? _resultBox(MediaItem item) {
@@ -957,7 +974,7 @@ class _SearchPageState extends State<SearchPage> {
                 tab.title == category.sourceTitle),
         orElse: () => SearchTab(title: category.title, items: []),
       );
-      final before = feed.items.where(_matchesScore).length;
+      final before = feed.items.where(_matchesFilters).length;
       setState(() {
         for (final item in page.items) {
           if (item.id.isEmpty ||
@@ -974,7 +991,7 @@ class _SearchPageState extends State<SearchPage> {
       });
       // A filtered-empty or duplicate page can still advance. Leave a manual
       // continuation instead of chaining requests without new visible results.
-      if (feed.items.where(_matchesScore).length > before) {
+      if (feed.items.where(_matchesFilters).length > before) {
         _scheduleLoadMoreIfNeeded(index, generation);
       }
     } catch (e) {
@@ -1235,7 +1252,7 @@ class _SearchPageState extends State<SearchPage> {
         ),
       );
     }
-    final items = feed.items.where(_matchesScore).toList(growable: false);
+    final items = feed.items.where(_matchesFilters).toList(growable: false);
     if (items.isEmpty) {
       final filtered = _idQuery == null && !_shuqiSource && _minimumScore > 0;
       final notice = ContentNotice(
@@ -1369,6 +1386,187 @@ class _SearchPageState extends State<SearchPage> {
     },
   );
 
+  static const _statusLabels = <int, String>{
+    -1: '状态不限',
+    0: '已完结',
+    1: '连载中',
+    4: '已停更',
+  };
+
+  static const _wordLabels = <int, String>{
+    0: '字数不限',
+    1: '30 万字以下',
+    2: '30–100 万字',
+    3: '100–300 万字',
+    4: '300 万字以上',
+  };
+
+  /// 分类 + 状态 + 字数 的二次筛选条。分类词来自分类页入口，可一键清除。
+  Widget _filterBar(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 4),
+      child: Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            if (_filters.tag != null && _filters.tag!.isNotEmpty)
+              _filterPill(
+                context,
+                '分类：${_filters.tag}',
+                active: true,
+                icon: CupertinoIcons.xmark,
+                onTap: () => setState(
+                  () => _filters = _filters.copyWith(clearTag: true),
+                ),
+              ),
+            _filterMenu(
+              context,
+              _statusLabels[_filters.status] ?? _statusLabels[-1]!,
+              active: _filters.status >= 0,
+              values: _statusLabels,
+              current: _filters.status,
+              onSelected: (value) =>
+                  setState(() => _filters = _filters.copyWith(status: value)),
+            ),
+            _filterMenu(
+              context,
+              _wordLabels[_filters.wordCount] ?? _wordLabels[0]!,
+              active: _filters.wordCount > 0,
+              values: _wordLabels,
+              current: _filters.wordCount,
+              onSelected: (value) => setState(
+                () => _filters = _filters.copyWith(wordCount: value),
+              ),
+            ),
+            if (_filters.status >= 0 || _filters.wordCount > 0)
+              _filterPill(
+                context,
+                '清除筛选',
+                active: false,
+                icon: CupertinoIcons.arrow_counterclockwise,
+                onTap: () => setState(
+                  () => _filters = SearchFilters(tag: _filters.tag),
+                ),
+              ),
+          ],
+        ),
+    );
+  }
+
+  Widget _filterPill(
+    BuildContext context,
+    String label, {
+    required bool active,
+    IconData? icon,
+    required VoidCallback onTap,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: active
+              ? scheme.primary.withValues(alpha: 0.16)
+              : scheme.onSurface.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+                color: active ? scheme.primary : scheme.onSurfaceVariant,
+              ),
+            ),
+            if (icon != null) ...[
+              const SizedBox(width: 4),
+              Icon(
+                icon,
+                size: 12,
+                color: active ? scheme.primary : scheme.onSurfaceVariant,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 可点开的筛选胶囊：点一下弹底部选择面板（比 PopupMenu 更贴近 iOS 手感，
+  /// 也避免在结果头部里塞一层 overlay 菜单）。
+  Widget _filterMenu(
+    BuildContext context,
+    String label, {
+    required bool active,
+    required Map<int, String> values,
+    required int current,
+    required ValueChanged<int> onSelected,
+  }) {
+    return _filterPill(
+      context,
+      label,
+      active: active,
+      icon: CupertinoIcons.chevron_down,
+      onTap: () async {
+        final picked = await showModalBottomSheet<int>(
+          context: context,
+          showDragHandle: true,
+          builder: (sheetContext) => SafeArea(
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final entry in values.entries)
+                    InkWell(
+                      onTap: () => Navigator.of(sheetContext).pop(entry.key),
+                      child: SizedBox(
+                        height: 48,
+                        child: Row(
+                          children: [
+                            const SizedBox(width: 22),
+                            Expanded(
+                              child: Text(
+                                entry.value,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: entry.key == current
+                                      ? FontWeight.w600
+                                      : FontWeight.w400,
+                                  color: entry.key == current
+                                      ? Theme.of(sheetContext).colorScheme.primary
+                                      : Theme.of(sheetContext).colorScheme.onSurface,
+                                ),
+                              ),
+                            ),
+                            if (entry.key == current)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 18),
+                                child: Icon(
+                                  CupertinoIcons.checkmark_alt,
+                                  size: 18,
+                                  color: Theme.of(sheetContext).colorScheme.primary,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        );
+        if (picked != null && picked != current) onSelected(picked);
+      },
+    );
+  }
+
   Widget _resultsHeading(BuildContext context, int count) {
     final scheme = Theme.of(context).colorScheme;
     final secondary = TextStyle(
@@ -1428,6 +1626,7 @@ class _SearchPageState extends State<SearchPage> {
               ),
             ],
           ),
+          if (!_shuqiSource) _filterBar(context),
           if (_idQuery != null)
             Row(
               children: [
@@ -1597,6 +1796,7 @@ class _SearchPageState extends State<SearchPage> {
     listView: _listView,
     onToggleLayout: _toggleLayout,
     showRatingHint: _idQuery == null && !_shuqiSource && _minimumScore > 0,
+    filters: _shuqiSource ? null : _filterBar(context),
   );
 
   Widget _classicIdHint(BuildContext context) => ClassicSearchIdLookupHint(
@@ -1647,7 +1847,7 @@ class _SearchPageState extends State<SearchPage> {
         ),
       );
     }
-    final items = feed.items.where(_matchesScore).toList(growable: false);
+    final items = feed.items.where(_matchesFilters).toList(growable: false);
     if (items.isEmpty) {
       return _classicResultsShell(
         context,

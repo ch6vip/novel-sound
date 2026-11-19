@@ -1,4 +1,5 @@
 import '../services/desktop_platform.dart';
+import '../services/ios_platform.dart';
 import '../services/audio_floating_routes.dart';
 import '../services/app_log.dart';
 import 'dart:async';
@@ -2004,7 +2005,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         if (texture != null)
           RotatedBox(
             quarterTurns: _player!.videoRotationCorrection ~/ 90,
-            child: isWindowsDesktop
+            child: isWindowsDesktop || isIOSDevice
                 ? DesktopPlatform.instance.videoSurface(
                     texture,
                     key: const ValueKey('player-texture'),

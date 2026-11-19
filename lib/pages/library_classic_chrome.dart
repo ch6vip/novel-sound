@@ -194,8 +194,11 @@ mixin _LibraryClassicChrome on _LibraryShelfViews {
       ShelfTokens.screenPadding,
       ShelfTokens.spaceS,
     ),
-    child: LayoutBuilder(
-      builder: (context, constraints) {
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        LayoutBuilder(
+          builder: (context, constraints) {
         final stacked =
             constraints.maxWidth < 480 ||
             MediaQuery.textScalerOf(context).scale(1) > 1.4;
@@ -274,7 +277,35 @@ mixin _LibraryClassicChrome on _LibraryShelfViews {
           ],
         );
       },
+        ),
+        if (tab == 0) ...[
+          const SizedBox(height: 8),
+          _classicShelfKindFilter(palette),
+        ],
+      ],
     ),
+  );
+
+  /// 书架 tab 的媒介类型筛选（全部 / 小说 / 漫画 / 短剧 / 漫剧 / 听书）。
+  Widget _classicShelfKindFilter(HomePalette palette) => Wrap(
+    spacing: 8,
+    runSpacing: 8,
+    children: [
+      for (final (value, label) in const [
+        (null, '全部'),
+        ('book', '小说'),
+        ('manga', '漫画'),
+        ('video', '短剧'),
+        ('manju', '漫剧'),
+        ('audio', '听书'),
+      ])
+        HomeChip(
+          key: Key('library-shelf-kind-${value ?? 'all'}'),
+          label: label,
+          selected: _shelfKindFilter == value,
+          onTap: () => setState(() => _shelfKindFilter = value),
+        ),
+    ],
   );
 
   Widget _classicTodayPill(HomePalette palette) => Container(

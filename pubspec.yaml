@@ -63,11 +63,16 @@ dependencies:
   # Android/iOS/macOS/Linux 的播放库会一起进包（APK 多出 ~11 MB）。
   media_kit_libs_windows_video: 1.0.11
   media_kit_libs_linux: 1.2.1
+  # iOS 的 libmpv（AVFoundation 输出 + 视频纹理）。同样只加 iOS 这一个，
+  # umbrella 包会把其余平台一起拖进来。
+  media_kit_libs_ios_video: 1.1.4
   file_selector: ^1.1.0
   flutter_tts: ^4.2.5
   webview_windows:
     path: third_party/webview_windows
   window_manager: ^0.5.1
+  # 亮屏锁：iOS 上也用得到（Windows 走 kernel32，Linux 走会话桥）。
+  wakelock_plus: ^1.5.2
   screen_retriever: 0.2.2
   smtc_windows: ^1.1.0
   ffi: ^2.1.4

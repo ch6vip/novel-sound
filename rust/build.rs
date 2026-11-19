@@ -1,6 +1,8 @@
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
-    if target_os != "windows" && target_os != "linux" {
+    // 加密媒体的 C 实现（CryptoDataSource 的同一份源码）在 iOS 上同样需要：
+    // desktop_media 的 sp_stream_* 入口是它导出的，缺了会链接失败。
+    if target_os != "windows" && target_os != "linux" && target_os != "ios" {
         return;
     }
     let sources = [

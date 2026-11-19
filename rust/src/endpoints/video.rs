@@ -696,7 +696,34 @@ async fn resolve_video_source_fallback_status(
                     }
                     return FallbackResolution::Found(url, key);
                 }
-                VideoSourceResolution::CodecRejected => codec_rejected = true,
+                VideoSourceResolution::CodecRejected => {
+                    // bytevc2-only list: ask the same endpoint for H.265 before
+                    // declaring the episode unplayable.
+                    match h265_fallback_url(&fallback_url) {
+                        Some(alt) => match fetch_fallback_video_info(
+                            ctx, video_id, source, &alt, deadline,
+                        )
+                        .await
+                        {
+                            Ok(h265_data) => match extract_fallback_video_source(&h265_data) {
+                                VideoSourceResolution::Found(url, key) => {
+                                    if let Some(cache) = fallback_bodies {
+                                        let mut cache = cache
+                                            .lock()
+                                            .unwrap_or_else(|error| error.into_inner());
+                                        cache
+                                            .entry(alt)
+                                            .or_insert_with(|| Arc::new(h265_data));
+                                    }
+                                    return FallbackResolution::Found(url, key);
+                                }
+                                _ => codec_rejected = true,
+                            },
+                            Err(_) => codec_rejected = true,
+                        },
+                        None => codec_rejected = true,
+                    }
+                }
                 VideoSourceResolution::NotFound => conclusive = false,
             },
             Err(_) => conclusive = false,
@@ -969,7 +996,26 @@ async fn fallback_variant_rows(
             }
         };
     let fallback_data = Arc::new(fallback_data);
-    let rows = fallback_rows_from_body(fallback_data.as_ref());
+    let mut rows = fallback_rows_from_body(fallback_data.as_ref());
+    if playable_variant_tier_count(&rows) == 0 {
+        // A bytevc2-only list yields no playable tier; the H.265 variant of the
+        // same endpoint carries the real quality ladder.
+        if let Some(alt) = h265_fallback_url(&fallback_url) {
+            if Instant::now() < deadline {
+                if let Ok(h265_data) =
+                    fetch_fallback_video_info(ctx, video_id, source, &alt, deadline).await
+                {
+                    let h265_data = Arc::new(h265_data);
+                    let h265_rows = fallback_rows_from_body(h265_data.as_ref());
+                    if playable_variant_tier_count(&h265_rows) > 0 {
+                        rows = h265_rows;
+                        let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
+                        cache.entry(alt).or_insert_with(|| h265_data.clone());
+                    }
+                }
+            }
+        }
+    }
     if playable_variant_tier_count(&rows) > 0 {
         let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
         cache
@@ -1340,6 +1386,27 @@ fn fallback_api_url(model: &Map<String, Value>) -> String {
     u = u.replace("&stream_type=audio_encrypt", "");
     u = u.replace("?stream_type=audio_encrypt&", "?");
     u
+}
+
+/// The same `fallback_api` endpoint re-served as H.265.
+///
+/// Some 漫剧 episodes only carry `bytevc2` (ByteDance VVC) tiers, and `codec_type=4`
+/// in the fallback URL asks for exactly those. No mpv build can decode VVC, so
+/// the client used to reject the episode outright even though the same endpoint
+/// happily returns `h265_hvc1` tiers when asked for `codec_type=1`. Rewriting
+/// the parameter is enough to get a playable stream.
+fn h265_fallback_url(url: &str) -> Option<String> {
+    let key = "codec_type=";
+    let start = url.find(key)? + key.len();
+    let rest = &url[start..];
+    let end = rest
+        .find(|c: char| c == '&' || c == '#')
+        .unwrap_or(rest.len());
+    let current = &rest[..end];
+    if current == "1" {
+        return None;
+    }
+    Some(format!("{}1{}", &url[..start], &rest[end..]))
 }
 
 async fn fetch_fallback_video_info(
@@ -3079,3 +3146,36 @@ mod spade_vectors;
 mod unsigned_get_cap;
 #[cfg(test)]
 mod variant_url_shapes;
+
+#[cfg(test)]
+mod h265_fallback {
+    use super::h265_fallback_url;
+
+    #[test]
+    fn bytevc2_request_is_rewritten_to_h265() {
+        let url = "https://vas.test/video/fplay/1/abc/def?aid=1967&codec_type=4&stream_type=encrypt";
+        assert_eq!(
+            h265_fallback_url(url).as_deref(),
+            Some("https://vas.test/video/fplay/1/abc/def?aid=1967&codec_type=1&stream_type=encrypt")
+        );
+    }
+
+    #[test]
+    fn last_parameter_without_separator_is_handled() {
+        let url = "https://vas.test/video/fplay/1/abc/def?aid=1967&codec_type=4";
+        assert_eq!(
+            h265_fallback_url(url).as_deref(),
+            Some("https://vas.test/video/fplay/1/abc/def?aid=1967&codec_type=1")
+        );
+    }
+
+    #[test]
+    fn already_h265_or_missing_parameter_needs_no_second_request() {
+        assert_eq!(
+            h265_fallback_url("https://vas.test/p?codec_type=1&aid=1967"),
+            None
+        );
+        assert_eq!(h265_fallback_url("https://vas.test/p?aid=1967"), None);
+        assert_eq!(h265_fallback_url(""), None);
+    }
+}

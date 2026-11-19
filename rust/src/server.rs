@@ -68,6 +68,27 @@ struct AppState {
     mode: ListenMode,
 }
 
+/// Binds the listener, moving to an ephemeral port when the requested one is
+/// taken.
+///
+/// A fixed port from `config.json` is what the app normally asks for, but it is
+/// not always ours: another copy of the app (different applicationId, same
+/// loopback port) or a leftover listener can hold it. Failing startup over that
+/// is worse than quietly moving on - the Flutter transport reads the real port
+/// back from [`LoopbackHandle`], and nothing else hard-codes the number.
+async fn bind_with_fallback(addr: &str, port: u16) -> Result<tokio::net::TcpListener, String> {
+    match tokio::net::TcpListener::bind((addr, port)).await {
+        Ok(listener) => Ok(listener),
+        Err(e) if port != 0 => {
+            log::warn!("listen {addr}:{port} unavailable ({e}); falling back to an ephemeral port");
+            tokio::net::TcpListener::bind((addr, 0)).await.map_err(|fallback| {
+                format!("listen {addr}:{port}: {e}; retry on port 0: {fallback}")
+            })
+        }
+        Err(e) => Err(format!("listen {addr}:{port}: {e}")),
+    }
+}
+
 pub async fn serve(
     server: Arc<Server>,
     port: u16,
@@ -77,9 +98,7 @@ pub async fn serve(
         ListenMode::Loopback => "127.0.0.1",
         ListenMode::Lan => "0.0.0.0",
     };
-    let listener = tokio::net::TcpListener::bind((addr, port))
-        .await
-        .map_err(|e| format!("listen {addr}:{port}: {e}"))?;
+    let listener = bind_with_fallback(addr, port).await?;
     let local = listener
         .local_addr()
         .map_err(|e| format!("local addr: {e}"))?;
@@ -433,6 +452,23 @@ mod tests {
         assert_eq!(
             discard_request_body(body).await,
             Err(StatusCode::PAYLOAD_TOO_LARGE)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_taken_port_falls_back_to_an_ephemeral_one() {
+        let occupied = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind a stand-in listener");
+        let taken = occupied.local_addr().expect("local addr").port();
+
+        let listener = bind_with_fallback("127.0.0.1", taken)
+            .await
+            .expect("a busy port must not fail startup");
+        assert_ne!(
+            listener.local_addr().expect("local addr").port(),
+            taken,
+            "the fallback must not reuse the occupied port"
         );
     }
 }

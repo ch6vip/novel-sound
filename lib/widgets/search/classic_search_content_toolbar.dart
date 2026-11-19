@@ -21,6 +21,9 @@ class ClassicSearchContentToolbar extends StatelessWidget {
   /// 「筛选已加载结果…」提示只在评分阈值生效时跟在工具条下面。
   final bool showRatingHint;
 
+  /// 二次筛选条（完结状态 / 字数档位），由搜索页提供，跟随工具条一起滚动。
+  final Widget? filters;
+
   const ClassicSearchContentToolbar({
     super.key,
     required this.shuqi,
@@ -30,6 +33,7 @@ class ClassicSearchContentToolbar extends StatelessWidget {
     required this.listView,
     required this.onToggleLayout,
     this.showRatingHint = false,
+    this.filters,
   });
 
   @override
@@ -79,6 +83,15 @@ class ClassicSearchContentToolbar extends StatelessWidget {
             ),
           ),
         ),
+        if (filters != null)
+          Padding(
+            padding: const EdgeInsets.only(
+              left: homeGutter,
+              right: homeGutter - 4,
+              bottom: 4,
+            ),
+            child: filters,
+          ),
         if (showRatingHint)
           Padding(
             padding: const EdgeInsets.only(left: homeGutter, bottom: 8),

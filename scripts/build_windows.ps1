@@ -1,4 +1,4 @@
-param([string]$FlutterRoot = '', [switch]$SkipTests, [switch]$ApplySemanticsBackport)
+﻿param([string]$FlutterRoot = '', [switch]$SkipTests, [switch]$ApplySemanticsBackport, [switch]$SkipPlayerVerifier)
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if (-not $FlutterRoot) {
@@ -39,8 +39,12 @@ try {
     & (Join-Path $PSScriptRoot 'prepare_windows_media.ps1')
     Invoke-Checked $flutter @('build', 'windows', '--release', '--no-pub')
     Invoke-Checked 'python' @('scripts/verify_windows_media.py')
-    Invoke-Checked (Join-Path $FlutterRoot 'bin\dart.bat') @('compile', 'exe', 'scripts/verify_windows_player.dart', '-o', 'build/verify_windows_player.exe')
-    Invoke-Checked (Join-Path $buildRoot 'build/verify_windows_player.exe') @()
+    if (-not $SkipPlayerVerifier) {
+        Invoke-Checked (Join-Path $FlutterRoot 'bin\dart.bat') @('compile', 'exe', 'scripts/verify_windows_player.dart', '-o', 'build/verify_windows_player.exe')
+        Invoke-Checked (Join-Path $buildRoot 'build/verify_windows_player.exe') @()
+    } else {
+        Write-Warning 'Skipping AOT player verifier (requires Flutter dart:ui).'
+    }
     if (-not $SkipTests) {
         $fixture = Join-Path $buildRoot 'build\validation\windows-player\encrypted.mp4'
         Invoke-Checked $flutter @('test', 'integration_test/windows_playback_test.dart', '-d', 'windows', '--no-pub', "--dart-define=FQAPP_TEST_MEDIA=$fixture")
@@ -51,7 +55,7 @@ try {
         if (-not (Test-Path -LiteralPath (Join-Path $bundle $required))) { throw "Missing bundle file: $required" }
     }
     Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $bundle 'LICENSE.txt')
-    Copy-Item -LiteralPath (Join-Path $repoRoot 'WINDOWS.md') -Destination (Join-Path $bundle '使用说明.md')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'WINDOWS.md') -Destination (Join-Path $bundle '浣跨敤璇存槑.md')
     $dist = Join-Path $repoRoot 'dist'
     New-Item -ItemType Directory -Path $dist -Force | Out-Null
     $manifest = Get-Content -LiteralPath (Join-Path $repoRoot 'pubspec.yaml') -Raw
@@ -62,3 +66,4 @@ try {
     Get-FileHash -LiteralPath $archive -Algorithm SHA256 | ForEach-Object { $_.Hash.ToLower() + '  ' + $name } | Set-Content -LiteralPath ($archive + '.sha256')
     Write-Output "Bundle: $archive"
 } finally { Set-Location -LiteralPath $original.Path }
+

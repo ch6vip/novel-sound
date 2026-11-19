@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:ffi' hide Size;
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:ffi/ffi.dart';
@@ -546,6 +547,14 @@ class DesktopPlatform with WindowListener {
     Uint8List bytes,
     List<String> extensions,
   ) async {
+    // iOS 没有「另存为」面板：写进临时目录后弹系统分享面板，由用户决定存到
+    // 「文件」、发出去还是取消（见 ios/Runner/AppDelegate.swift 的 IosFilesBridge）。
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+      return const MethodChannel('fqapp/ios_files').invokeMethod<String>(
+        'saveFile',
+        {'name': _safeName(name), 'bytes': bytes},
+      );
+    }
     final location = await getSaveLocation(
       suggestedName: _safeName(name),
       acceptedTypeGroups: [XTypeGroup(label: '文件', extensions: extensions)],
@@ -728,9 +737,21 @@ class DesktopPlatform with WindowListener {
   }
 
   Future<Map<String, dynamic>?> pickBook() async {
+    // iOS 的 UIDocumentPicker 只认 UTI，file_selector 的 iOS 实现在
+    // uniformTypeIdentifiers 为空时直接抛 ArgumentError，不会退回去看
+    // extensions，所以两条路要分开给。
     final file = await openFile(
       acceptedTypeGroups: [
-        const XTypeGroup(label: '本地书籍', extensions: ['txt', 'epub']),
+        if (Platform.isIOS)
+          const XTypeGroup(
+            label: '本地书籍',
+            uniformTypeIdentifiers: [
+              'public.plain-text',
+              'org.idpf.epub-container',
+            ],
+          )
+        else
+          const XTypeGroup(label: '本地书籍', extensions: ['txt', 'epub']),
       ],
     );
     if (file == null) return null;
@@ -791,34 +812,133 @@ String decodeDesktopText(Uint8List bytes) {
   try {
     return utf8.decode(bytes).replaceFirst(RegExp('^\uFEFF'), '');
   } on FormatException {
-    final convert = DynamicLibrary.open('kernel32.dll')
-        .lookupFunction<
-          Int32 Function(
-            Uint32,
-            Uint32,
-            Pointer<Uint8>,
-            Int32,
-            Pointer<Uint16>,
-            Int32,
-          ),
-          int Function(int, int, Pointer<Uint8>, int, Pointer<Uint16>, int)
-        >('MultiByteToWideChar');
-    final input = calloc<Uint8>(bytes.length);
-    input.asTypedList(bytes.length).setAll(0, bytes);
-    Pointer<Uint16> output = nullptr;
-    try {
-      final length = convert(54936, 0, input, bytes.length, nullptr, 0);
-      if (length == 0) throw const FormatException('无法识别 TXT 编码');
-      output = calloc<Uint16>(length);
-      if (convert(54936, 0, input, bytes.length, output, length) == 0) {
-        throw const FormatException('无法读取 TXT');
-      }
-      return String.fromCharCodes(output.asTypedList(length));
-    } finally {
-      calloc.free(input);
-      if (output != nullptr) calloc.free(output);
-    }
+    // 中文 TXT 大量是 GBK/GB18030。Windows 上系统 API 可转；其余平台必须走
+    // iconv——早先这里无条件 DynamicLibrary.open('kernel32.dll')，在
+    // iOS/macOS 上必然抛错，导入就会只剩下「请重试」这一句。
+    return Platform.isWindows
+        ? _decodeGb18030Windows(bytes)
+        : _decodeGb18030Iconv(bytes);
   }
+}
+
+String _decodeGb18030Windows(Uint8List bytes) {
+  final convert = DynamicLibrary.open('kernel32.dll')
+      .lookupFunction<
+        Int32 Function(
+          Uint32,
+          Uint32,
+          Pointer<Uint8>,
+          Int32,
+          Pointer<Uint16>,
+          Int32,
+        ),
+        int Function(int, int, Pointer<Uint8>, int, Pointer<Uint16>, int)
+      >('MultiByteToWideChar');
+  final input = calloc<Uint8>(bytes.isEmpty ? 1 : bytes.length);
+  input.asTypedList(bytes.length).setAll(0, bytes);
+  Pointer<Uint16> output = nullptr;
+  try {
+    final length = convert(54936, 0, input, bytes.length, nullptr, 0);
+    if (length == 0) throw const FormatException('无法识别 TXT 编码');
+    output = calloc<Uint16>(length);
+    if (convert(54936, 0, input, bytes.length, output, length) == 0) {
+      throw const FormatException('无法读取 TXT');
+    }
+    return String.fromCharCodes(output.asTypedList(length));
+  } finally {
+    calloc.free(input);
+    if (output != nullptr) calloc.free(output);
+  }
+}
+
+typedef _IconvOpenNative =
+    Pointer<Void> Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _IconvNative =
+    IntPtr Function(
+      Pointer<Void>,
+      Pointer<Pointer<Uint8>>,
+      Pointer<IntPtr>,
+      Pointer<Pointer<Uint8>>,
+      Pointer<IntPtr>,
+    );
+typedef _IconvDart =
+    int Function(
+      Pointer<Void>,
+      Pointer<Pointer<Uint8>>,
+      Pointer<IntPtr>,
+      Pointer<Pointer<Uint8>>,
+      Pointer<IntPtr>,
+    );
+typedef _IconvOpenDart = Pointer<Void> Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _IconvCloseNative = Int32 Function(Pointer<Void>);
+typedef _IconvCloseDart = int Function(Pointer<Void>);
+
+/// GB18030 → UTF-8，走系统 libiconv。
+///
+/// iOS 把 libiconv 放在 dyld 共享缓存里，符号经 `-liconv` 链接后可在这种
+/// 进程内 dlsym 到（macOS 同样）。
+String _decodeGb18030Iconv(Uint8List bytes) {
+  final process = DynamicLibrary.process();
+  final open = process.lookupFunction<_IconvOpenNative, _IconvOpenDart>(
+    'iconv_open',
+  );
+  final convert = process.lookupFunction<_IconvNative, _IconvDart>('iconv');
+  final close = process.lookupFunction<_IconvCloseNative, _IconvCloseDart>(
+    'iconv_close',
+  );
+  final target = 'UTF-8'.toNativeUtf8();
+  Pointer<Void> descriptor = nullptr;
+  try {
+    // 各平台库里的编码名不完全一致：GB18030 覆盖 GBK/CP936，缺了再退一级。
+    for (final name in const ['GB18030', 'GBK', 'CP936']) {
+      final source = name.toNativeUtf8();
+      try {
+        descriptor = open(target, source);
+      } finally {
+        calloc.free(source);
+      }
+      if (descriptor.address > 0) break;
+    }
+  } finally {
+    calloc.free(target);
+  }
+  if (descriptor.address <= 0) {
+    throw const FormatException('无法识别 TXT 编码');
+  }
+  final input = calloc<Uint8>(bytes.isEmpty ? 1 : bytes.length);
+  input.asTypedList(bytes.length).setAll(0, bytes);
+  final inPtr = calloc<Pointer<Uint8>>()..value = input;
+  final inLeft = calloc<IntPtr>()..value = bytes.length;
+  const chunk = 1 << 16;
+  final outBuf = calloc<Uint8>(chunk);
+  final outPtr = calloc<Pointer<Uint8>>();
+  final outLeft = calloc<IntPtr>();
+  // 输出缓冲复用，必须拷贝：copy:false 会让各轮数据互相覆盖。
+  final builder = BytesBuilder();
+  try {
+    while (true) {
+      outPtr.value = outBuf;
+      outLeft.value = chunk;
+      final result = convert(descriptor, inPtr, inLeft, outPtr, outLeft);
+      final produced = chunk - outLeft.value;
+      if (produced > 0) builder.add(outBuf.asTypedList(produced));
+      if (result == -1) {
+        // 只有 E2BIG（输出缓冲写满）值得重来；EILSEQ/EINVAL 说明不是 GB18030。
+        if (produced > 0 && inLeft.value > 0) continue;
+        throw const FormatException('无法识别 TXT 编码');
+      }
+      if (inLeft.value == 0) break;
+    }
+  } finally {
+    close(descriptor);
+    calloc.free(input);
+    calloc.free(inPtr);
+    calloc.free(inLeft);
+    calloc.free(outBuf);
+    calloc.free(outPtr);
+    calloc.free(outLeft);
+  }
+  return utf8.decode(builder.takeBytes());
 }
 
 class _DesktopPlayer {
@@ -843,9 +963,11 @@ class _DesktopPlayer {
       player.stream.completed.listen((v) => event('completed', v)),
       player.stream.width.listen((_) => _size()),
       player.stream.height.listen((_) => _size()),
-      player.stream.error.listen(
-        (_) => event('error', {'message': '媒体播放失败，请重试或切换清晰度'}),
-      ),
+      player.stream.error.listen((message) {
+        // 原始报错只写日志：它可能带签名 URL，绝不能进界面文案。
+        AppLog.d('desktop-player', 'id=$id mpv error=$message');
+        event('error', {'message': '媒体播放失败，请重试或切换清晰度'});
+      }),
     ]);
     unawaited(
       video.waitUntilFirstFrameRendered.then((_) => event('firstFrame', true)),

@@ -39,6 +39,13 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { it != null }
 
+// 与官方原版共存：FQAPP_COEXIST=true 时换一个 applicationId 与显示名，
+// 这样同一台手机上可以同时装原版和本修改版（互不覆盖、数据各自独立）。
+// 默认保持上游的 com.fqapp.fqapp / 「什锦铺」，不影响正常构建。
+val coexistBuild = System.getenv("FQAPP_COEXIST")?.toBoolean() == true
+val appIdForBuild = if (coexistBuild) "com.fqapp.fqapp.mod" else "com.fqapp.fqapp"
+val appLabelForBuild = if (coexistBuild) "什锦铺·改" else "什锦铺"
+
 android {
     namespace = "com.fqapp.fqapp"
     compileSdk = flutter.compileSdkVersion
@@ -60,7 +67,8 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.fqapp.fqapp"
+        applicationId = appIdForBuild
+        manifestPlaceholders["appLabel"] = appLabelForBuild
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

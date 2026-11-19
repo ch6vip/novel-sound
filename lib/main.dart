@@ -17,6 +17,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import 'dart:async';
 
+import 'services/ios_platform.dart';
 import 'services/linux_platform.dart';
 
 import 'pages/home_page.dart';
@@ -110,6 +111,8 @@ Future<void> _prepareRuntime() async {
   });
   if (isLinuxDesktop) await LinuxPlatform.install();
   if (isWindowsDesktop) await DesktopPlatform.instance.initialize();
+  // iOS 没有原生播放器通道：把 fqapp/native_player 接到进程内的 media_kit。
+  if (isIOSDevice) await IosPlatform.install();
   // 应用内日志：接管 debugPrint 与 FlutterError.onError，未处理异步异常由
   // [main] 的 runZonedGuarded 捕获；文件持久化异步开启，失败只退回内存模式。
   AppLog.instance.install();
@@ -1044,11 +1047,12 @@ class _RootShellState extends State<RootShell> with TickerProviderStateMixin {
       ),
       // 上游 Wenku8 GlassDock：胶囊、拖动预览和液态玻璃选中区；短剧视频流
       // 与 OLED 纯黑下改用同色静态底板，不对每帧变化的画面做实时折射。
+      //
+      // 底部四个入口常驻：`DockAutoHide` 仍然存在（刷新路由时会 reveal），
+      // 但不再参与「下滚收起 / 上滑露出」——`DockAutoHideSlide` 现在只做
+      // 位移动画的承载，hide 恒为 null，dock 不会自己滑走。
       bottomNavigationBar: DockAutoHideSlide(
-        // 下滚收起 / 上滑露出（PiliPlus 同参：500ms、强调三段曲线）。
-        hide: _dockAutoHide,
-        // 墨水屏已通过 disabledProbe 完全禁用收起；此处仅保证进入 eink 时
-        // reveal 回正过渡零帧落位（与 _startPageMotion 降级约定一致）。
+        hide: const AlwaysStoppedAnimation<bool>(false),
         reduceMotion: einkModeNotifier.value,
         child: ShellDock(
           selectedIndex: _index,

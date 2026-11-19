@@ -1,5 +1,6 @@
 import '../widgets/video_player_chrome.dart';
 import '../services/desktop_platform.dart';
+import '../services/ios_platform.dart';
 
 import 'dart:async';
 
@@ -4280,7 +4281,7 @@ class _InlineVideoLayer extends StatelessWidget {
                     rect: layout.video,
                     child: RotatedBox(
                       quarterTurns: playback.rotation.value,
-                      child: isWindowsDesktop
+                      child: isWindowsDesktop || isIOSDevice
                           ? DesktopPlatform.instance.videoSurface(
                               textureId,
                               key: ValueKey('drama_inline_${item.id}'),

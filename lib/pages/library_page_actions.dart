@@ -156,6 +156,9 @@ mixin _LibraryPageActions on _LibraryPageStateBase {
     await _persist(() => view.setSource(ShelfSourceFilter.all));
     await _persist(() => view.setCategoryOf(_scope, ShelfCategory.all));
     if (mounted && _tab == 2) setState(() => _collectionFilter = null);
+    if (mounted && _tab == 0 && _shelfKindFilter != null) {
+      setState(() => _shelfKindFilter = null);
+    }
   }
 
   Future<void> _openMoreMenu(BuildContext anchor) async {
@@ -200,10 +203,25 @@ mixin _LibraryPageActions on _LibraryPageStateBase {
       if (!mounted) return;
       _load();
       _showSnack('已导入《${book.title}》');
-    } catch (e) {
+    } catch (e, stack) {
+      // 原始异常先落日志（可能带本地路径），界面上只留一句可复述的摘要：
+      // 这条路径在 iOS 上曾经只有「请重试」，等于没有线索。
+      AppLog.d('library-import', 'import failed: ${e.runtimeType} $e\n$stack');
       if (mounted) {
-        final message = e is FormatException ? e.message : '请重试';
-        _showSnack('导入失败：$message');
+        final detail = switch (e) {
+          FormatException(:final message) => message,
+          PlatformException(:final message)
+              when message != null && message.isNotEmpty =>
+            message,
+          MissingPluginException(:final message)
+              when message != null && message.isNotEmpty =>
+            message,
+          _ => '${e.runtimeType}: $e',
+        };
+        final oneLine = detail.replaceAll(RegExp(r'\s+'), ' ').trim();
+        _showSnack(
+          '导入失败：${oneLine.length > 140 ? '${oneLine.substring(0, 140)}…' : oneLine}',
+        );
       }
     } finally {
       if (mounted) setState(() => _importingBook = false);
@@ -381,7 +399,12 @@ mixin _LibraryPageActions on _LibraryPageStateBase {
         );
       default:
         return ShelfProjection.apply(
-          _shelf,
+          _shelfKindFilter == null
+              ? _shelf
+              : [
+                  for (final entry in _shelf)
+                    if (entry.item.kind == _shelfKindFilter) entry,
+                ],
           sort: view.sort,
           reading: view.filter,
           source: view.source,
