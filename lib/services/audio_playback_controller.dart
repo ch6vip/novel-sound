@@ -123,10 +123,7 @@ class _AudioPlaybackController extends ChangeNotifier
   /// 睡眠定时选的是「听完本章」而不是分钟档（官方 `cip`）。
   bool _sleepAtChapterEnd = false;
 
-  /// 连播倒计时的 3 秒窗口（官方 `te`「%s后播放下一集」）。
-  Timer? _advanceTimer;
-  int? _advanceRemaining;
-  final ValueNotifier<int?> _advanceCountdown = ValueNotifier<int?>(null);
+  _AudioPreload? _audioPreload;
 
   /// 跳过片头/片尾（按书，打开章节时读入）。
   AudioSkipPoints _skipPoints = AudioSkipPoints.none;
@@ -139,23 +136,8 @@ class _AudioPlaybackController extends ChangeNotifier
   bool _inShelf = false;
   bool _switchingVersion = false;
   final Map<String, AudioSource> _audioSourceCache = {};
+  final Map<String, Future<AudioSource>> _audioSourceRequests = {};
   Timer? _sleepTimerTick;
-
-  void _prefetchNextAudioChapter() {
-    if (request.sourceLoader != null ||
-        !_autoAdvance ||
-        _index + 1 >= _chapters.length) {
-      return;
-    }
-    final nextId = _chapters[_index + 1].itemId;
-    final cacheKey = '$nextId|$_toneId';
-    if (_audioSourceCache.containsKey(cacheKey)) return;
-    unawaited(
-      _loadSourceWithRetry(
-        nextId,
-      ).catchError((Object _) => AudioSource(itemId: nextId, url: '')),
-    );
-  }
 
   /// Resolves the listening-page decorations. See [AudioExtras].
   Future<AudioExtras> _loadExtras() {
@@ -527,7 +509,6 @@ class _AudioPlaybackController extends ChangeNotifier
     _visibilityResumeGeneration = null;
     if (_closed) return;
     _cancelTrackRecovery(this);
-    _cancelAdvanceCountdown(this);
     if (!_wantPlay) return;
     _update(() => _wantPlay = false);
     _listenTime.stop();
@@ -564,12 +545,12 @@ class _AudioPlaybackController extends ChangeNotifier
       unawaited(_resumeAfterVisibility());
     }
     if (!_appActive) {
+      if (isIOSPlatform) unawaited(_dropAudioPreload());
       // 切换到后台或锁屏时立即持久化当前进度，防止后续被系统杀后台导致进度丢失。
       unawaited(_persistProgress());
       // 若后台听书开关关闭，切后台自动暂停播放并移除前台通知。
       if (!AudioPreferences.instance.backgroundPlayback.value ||
           (isLinuxDesktop && DesktopSystemSession.instance.suspended)) {
-        _cancelAdvanceCountdown(this);
         if (_wantPlay) {
           final resume = isLinuxDesktop;
           _visibilityPause = _pauseForOtherMedia();
@@ -655,7 +636,6 @@ class _AudioPlaybackController extends ChangeNotifier
     final trackCancellation = Completer<void>();
     _trackCancellation = trackCancellation;
     final trackCancelled = trackCancellation.future;
-    _cancelAdvanceCountdown(this);
     ++_seekGeneration;
     _saveTimer?.cancel();
     _listenTime.stop();
@@ -755,9 +735,10 @@ class _AudioPlaybackController extends ChangeNotifier
   }) async {
     IosAudioSession.cancelInterruption(_mediaOwner);
     if (_closed || index < 0 || index >= _chapters.length) return;
-    // 任何换章动作都意味着用户自己接管了，倒计时窗口必须作废。
+    final preload = refreshSource
+        ? null
+        : _takeAudioPreload(_chapters[index].itemId, toneId ?? _toneId);
     _resetTrackRecovery(this);
-    _cancelAdvanceCountdown(this);
     final generation = ++_generation;
     _cancelTrackRequests();
     final trackCancellation = Completer<void>();
@@ -820,8 +801,21 @@ class _AudioPlaybackController extends ChangeNotifier
           completed ??
           (position == null && sameChapter && saved?['completed'] == true);
       final itemId = _chapters[index].itemId;
-      final source = await _loadSourceWithRetry(itemId, refresh: refreshSource);
+      var warm = preload;
+      var source = warm == null
+          ? await _loadSourceWithRetry(itemId, refresh: refreshSource)
+          : warm.source!;
       if (!_current(generation)) return;
+      await released;
+      if (!_current(generation)) return;
+      // Buffering can fail while the old chapter's player is being released.
+      // In that case a fresh source and a cold player are safer than adoption.
+      if (warm != null && warm.player.lastError != null) {
+        unawaited(warm.dispose());
+        warm = null;
+        source = await _loadSourceWithRetry(itemId, refresh: true);
+        if (!_current(generation)) return;
+      }
       final uri = Uri.tryParse(source.url);
       // 离线命中给的是 `file://<path>`：本地文件桥不经 HTTP，没有 host。
       final isLocalFile = uri != null && uri.scheme == 'file';
@@ -831,13 +825,13 @@ class _AudioPlaybackController extends ChangeNotifier
           (!isLocalFile && uri.host.isEmpty)) {
         throw const FormatException('Invalid audio source');
       }
-      await released;
-      if (!_current(generation)) return;
       final player = candidate =
-          request.playerFactory?.call() ?? NativePlayer(audioOnly: true);
+          warm?.player ??
+          request.playerFactory?.call() ??
+          NativePlayer(audioOnly: true);
       player.iosMediaOwner = _mediaOwner;
       _player = player;
-      await player.create(source.url, source.keyHex);
+      if (warm == null) await player.create(source.url, source.keyHex);
       if (!_current(generation, player)) {
         await player.dispose();
         return;
@@ -954,85 +948,26 @@ class _AudioPlaybackController extends ChangeNotifier
       } else {
         await candidate?.dispose();
       }
-    }
-  }
-
-  /// Fetches one chapter's audio source.
-  ///
-  /// The backend handles HTTP authentication failures and transient transport
-  /// retries. Only recoverable network failures are retried here (see
-  /// [isTransientNetworkFailure]). An injected loader is never multiplied.
-  ///
-  /// A pure-TTS book has no default voice: the playinfo endpoint answers
-  /// NO_THIS_TONE for tone 0, so the first selectable voice is retried once.
-  Future<AudioSource> _loadSourceWithRetry(
-    String itemId, {
-    bool refresh = false,
-  }) async {
-    final generation = _generation;
-    // 已下载的章节直接命中本地文件：离线可播，在线也不重复拉流。本地命中
-    // 排在注入 loader 之前，测试才能覆盖「离线优先」这条真实顺序。
-    final local = await _localSource(itemId, _toneId);
-    if (local != null) {
-      AppLog.d('audio', 'event=source origin=local');
-      return local;
-    }
-    final loader = request.sourceLoader;
-    if (loader != null) {
-      return loader(
-        itemId,
-        toneId: _toneId,
-      ).timeout(const Duration(seconds: 30));
-    }
-    final cacheKey = '$itemId|$_toneId';
-    // A failed CDN address must not survive an explicit user retry. Local
-    // downloads remain authoritative; this only invalidates the online model.
-    if (refresh) {
-      _audioSourceCache.removeWhere((key, _) => key.startsWith('$itemId|'));
-    }
-    final cached = _audioSourceCache[cacheKey];
-    if (cached != null) {
-      AppLog.d('audio', 'event=source origin=cache');
-      return cached;
-    }
-    AppLog.d('audio', 'event=source origin=network refresh=$refresh');
-    final toneId = _toneId;
-    AudioSource result;
-    try {
-      result = await _fetchSource(itemId, toneId);
-    } on ApiException catch (error) {
-      if (toneId != '0' ||
-          !error.message.contains('NO_THIS_TONE') ||
-          !_current(generation)) {
-        rethrow;
-      }
-      final fallback = _firstSelectableTone();
-      if (fallback == null) rethrow;
-      final tone = fallback;
-      _toneSwitchedForChapter = true;
-      result = await _fetchSource(itemId, tone);
-    }
-    // A prefetch from the previous playback generation must not repopulate
-    // the cache after an explicit retry or a chapter change.
-    if (_current(generation)) {
-      _audioSourceCache[cacheKey] = result;
-      while (_audioSourceCache.length > 5) {
-        _audioSourceCache.remove(_audioSourceCache.keys.first);
+    } finally {
+      if (preload != null && !identical(_player, preload.player)) {
+        await preload.dispose();
       }
     }
-    return result;
   }
 
   /// 默认音色与换音色回退共用同一套重试策略。每次尝试最多等 30 秒；超时、
   /// 404 和业务错误码（NO_THIS_TONE、审核失败）不在这里重复请求；鉴权
   /// 失败由后端处理。只有网络中断、HTTP 408/429/5xx 值得再来一次。
-  Future<AudioSource> _fetchSource(String itemId, String toneId) =>
-      retryTransient(
-        () => ApiClient.instance
-            .audioSource(itemId, bookId: _bookId, toneId: toneId)
-            .timeout(const Duration(seconds: 30)),
-        shouldRetry: isTransientNetworkFailure,
-      );
+  Future<AudioSource> _fetchSource(
+    String itemId,
+    String toneId, {
+    required String bookId,
+  }) => retryTransient(
+    () => ApiClient.instance
+        .audioSource(itemId, bookId: bookId, toneId: toneId)
+        .timeout(const Duration(seconds: 30)),
+    shouldRetry: isTransientNetworkFailure,
+  );
 
   /// 离线命中：当前音色下这一章已下载完成时直接用本地文件。
   ///
@@ -1313,6 +1248,7 @@ class _AudioPlaybackController extends ChangeNotifier
         // Notifier-only: the 5Hz tick rebuilds the progress row, not the page.
         _position.value = _boundedPosition(position, _duration);
         _publishReadAlong();
+        _prepareNextAudio();
         // 片尾跳过：进入尾部区间就按「本章播完」处理，复用同一条完成路径，
         // 用 _skipOutroFired 挡住重复触发。
         if (!_completed &&
@@ -1320,6 +1256,7 @@ class _AudioPlaybackController extends ChangeNotifier
             _skipPoints.atOutro(_position.value, _duration)) {
           _skipOutroFired = true;
           _handleChapterCompleted(this, player, generation);
+          return;
         }
         // Publish the REAL playing state: a paused seek also fires this
         // stream, and publishing playing=true would yank the reader back to
@@ -1384,6 +1321,7 @@ class _AudioPlaybackController extends ChangeNotifier
         !player.buffering) {
       _listenTime.start();
       _prefetchNextAudioChapter();
+      _prepareNextAudio();
       _scheduleTrackRecovery(this);
     } else {
       _listenTime.stop();
@@ -1431,6 +1369,7 @@ class _AudioPlaybackController extends ChangeNotifier
   }
 
   Future<void> _releasePlayer() {
+    final preloadReleased = _dropAudioPreload();
     final player = _player;
     _player = null;
     _activeIndex = null;
@@ -1440,7 +1379,7 @@ class _AudioPlaybackController extends ChangeNotifier
     ];
     _subscriptions.clear();
     _releases = _releases.then((_) async {
-      await Future.wait(cancellations);
+      await Future.wait([...cancellations, preloadReleased]);
       if (player == null) return;
       try {
         if (player.isCreated) await player.pause();
@@ -1467,7 +1406,6 @@ class _AudioPlaybackController extends ChangeNotifier
           '${error is NativePlaybackException ? ' native=${error.errorCode} http=${error.httpStatusCode}' : ''}'
           '${error is BackendRequestAborted ? ' timed_out=${error.timedOut}' : ''}',
     );
-    _cancelAdvanceCountdown(this);
     _resetTrackRecovery(this);
     _cancelTrackRequests();
     ListeningSession.instance.clear();
@@ -1519,7 +1457,7 @@ class _AudioPlaybackController extends ChangeNotifier
     int generation, {
     bool forInterruption = false,
   }) async {
-    _cancelAdvanceCountdown(this);
+    unawaited(_dropAudioPreload());
     _cancelTrackRecovery(this);
     _publishListeningSession(playing: false);
     try {
@@ -1538,7 +1476,6 @@ class _AudioPlaybackController extends ChangeNotifier
     _visibilityResumeGeneration = null;
     final player = _player;
     if (!_ready || player == null) return;
-    _cancelAdvanceCountdown(this);
     final generation = _generation;
     if (_wantPlay) {
       _update(() => _wantPlay = false);
@@ -1570,14 +1507,12 @@ class _AudioPlaybackController extends ChangeNotifier
   }
 
   void _previewSeek(double position) {
-    _cancelAdvanceCountdown(this);
     _seekPreview.value = position;
   }
 
   Future<void> _seekTo(Duration position) async {
     final player = _player;
     if (!_ready || player == null) return;
-    _cancelAdvanceCountdown(this);
     final generation = _generation;
     final seekGeneration = ++_seekGeneration;
     final target = _boundedPosition(position, _duration);
@@ -1873,7 +1808,6 @@ class _AudioPlaybackController extends ChangeNotifier
   Future<void> _close() async {
     if (_closed) return;
     _closed = true;
-    _cancelAdvanceCountdown(this);
     _resetTrackRecovery(this);
     _unregisterFairMemoryFlush?.call();
     _unregisterFairMemoryFlush = null;

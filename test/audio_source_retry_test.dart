@@ -90,6 +90,63 @@ void main() {
     ], reason: '回退音色的 404 也只请求一次');
   });
 
+  testWidgets('prefetched chapter uses a fresh source if the user retries', (
+    tester,
+  ) async {
+    final attempts = <String, int>{};
+    _sourceResponse = (request) async {
+      final id = request.url.pathSegments.last;
+      final count = attempts.update(
+        id,
+        (count) => count + 1,
+        ifAbsent: () => 1,
+      );
+      return _json(
+        _playinfoPayload(id, url: 'https://cdn.example/$id-$count.m4a'),
+        200,
+      );
+    };
+
+    final players = <ControlledNativePlayer>[];
+    await _mount(
+      tester,
+      players: players,
+      chapters: [
+        Chapter(itemId: '1', title: '第1章', volumeName: ''),
+        Chapter(itemId: '2', title: '第2章', volumeName: ''),
+      ],
+    );
+    await _pumpUntil(tester, () => attempts['2'] == 1);
+    final current = players.single;
+    expect(current.isPlaying, isTrue);
+
+    current.emitPosition(const Duration(seconds: 100));
+    await _pumpUntil(
+      tester,
+      () => players.length == 2 && players.last.isCreated,
+    );
+    final warm = players.last;
+    expect(warm.isPlaying, isFalse);
+    expect(attempts['2'], 1);
+
+    current.emitCompleted();
+    await _pumpUntil(tester, () => warm.isPlaying);
+    expect(players, hasLength(2));
+    expect(warm.calls, contains('create:https://cdn.example/2-1.m4a'));
+
+    warm.errors.add(const NativePlaybackException('Playback failed'));
+    await _flush(tester);
+    await tester.ensureVisible(find.byKey(const ValueKey('audio-retry')));
+    await tester.tap(find.byKey(const ValueKey('audio-retry')));
+    await _pumpUntil(
+      tester,
+      () => players.length == 3 && players.last.isPlaying,
+    );
+    expect(attempts['2'], 2);
+    expect(warm.disposed, isTrue);
+    expect(players.last.calls, contains('create:https://cdn.example/2-2.m4a'));
+  });
+
   testWidgets('a 5xx audio source is retried and then plays', (tester) async {
     final sourceAttempts = <String, int>{};
     final timePointAttempts = <String, int>{};

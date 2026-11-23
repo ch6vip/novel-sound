@@ -150,7 +150,7 @@ extension _AudioListeningLayout on _AudioPageState {
         c._loading ||
         (c._player?.buffering ?? false) ||
         c._completed;
-    // Loading, retries and the countdown share the subtitle slot, so none of
+    // Loading and retries share the subtitle slot, so neither of
     // them can move the seek bar or playback controls.
     return SizedBox(
       key: const Key('audio_listening_transcript'),
@@ -199,18 +199,6 @@ extension _AudioListeningLayout on _AudioPageState {
                     ),
                   ),
               ],
-              Align(
-                alignment: Alignment.bottomCenter,
-                child: ValueListenableBuilder<int?>(
-                  valueListenable: c.advanceCountdown,
-                  builder: (context, seconds, _) => seconds == null
-                      ? const SizedBox.shrink()
-                      : AudioAdvanceBanner(
-                          seconds: seconds,
-                          onCancel: () => _cancelAdvanceCountdown(c),
-                        ),
-                ),
-              ),
             ],
           );
         },

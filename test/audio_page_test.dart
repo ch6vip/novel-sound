@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
 import 'package:fqapp/models/audio_extra.dart';
 import 'package:fqapp/models/audio_time_track.dart';
 import 'package:fqapp/models/chapter_media.dart';
@@ -180,19 +181,13 @@ void main() {
   ) async {
     final session = _Session();
     await _mount(tester, session);
-    // 官方 `te`「%s后播放下一集」：播完先进倒计时窗口，不再立刻跳章。
     session.players.first.emitCompleted();
     await _flush(tester);
-    expect(find.byKey(const Key('audio_advance_banner')), findsOneWidget);
-    expect(session.players, hasLength(1));
-    await tester.pump(const Duration(seconds: 3));
-    await _flush(tester);
+    expect(find.byKey(const Key('audio_advance_banner')), findsNothing);
     expect(session.players, hasLength(2));
     expect(session.store.entry?['chapterId'], '2');
     expect(session.players.last.isPlaying, true);
     session.players.last.emitCompleted();
-    await _flush(tester);
-    await tester.pump(const Duration(seconds: 3));
     await _flush(tester);
     expect(session.players, hasLength(3));
     // 末章播完：不再连播，改为官方 `v7` 的书末提示。
@@ -209,24 +204,220 @@ void main() {
     expect(session.players.last.isPlaying, true);
   });
 
-  testWidgets('cancelling the advance countdown stays on the chapter', (
+  testWidgets('iOS background advance reopens the current player', (
+    tester,
+  ) async {
+    await AudioPreferences.instance.setBackgroundPlayback(true);
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const audioSession = MethodChannel('fqapp/audio_session');
+    const events = MethodChannel('fqapp/audio_session/events');
+    final methods = <String>[];
+    messenger.setMockMethodCallHandler(audioSession, (call) async {
+      methods.add(call.method);
+      return call.method == 'beginBackgroundWindow' ? 1 : null;
+    });
+    messenger.setMockMethodCallHandler(events, (_) async => null);
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(audioSession, null);
+      messenger.setMockMethodCallHandler(events, null);
+    });
+    final session = _Session();
+    await _mount(tester, session);
+    final current = session.players.single;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await _flush(tester);
+    current.emitPosition(const Duration(seconds: 100));
+    await _flush(tester);
+    expect(session.players, [current]);
+
+    current.emitCompleted();
+    await _flush(tester);
+    expect(session.players, [current]);
+    expect(
+      current.calls.where((call) => call.startsWith('reopen:')),
+      hasLength(1),
+    );
+    expect(current.isPlaying, true);
+    await tester.pump(const Duration(seconds: 5));
+    await _flush(tester);
+    expect(session.store.entry?['chapterId'], '2');
+    expect(
+      methods,
+      containsAllInOrder(['beginBackgroundWindow', 'endBackgroundWindow']),
+    );
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('disabled auto advance stays on the completed chapter', (
+    tester,
+  ) async {
+    final session = _Session(
+      store: ControlledReaderStore(
+        entry: {'kind': 'audio', 'autoAdvance': false},
+      ),
+    );
+    await _mount(tester, session);
+    session.players.first.emitCompleted();
+    await _flush(tester);
+    await tester.pump(const Duration(seconds: 5));
+    await _flush(tester);
+    expect(session.players, hasLength(1));
+    expect(session.players.single.isPlaying, false);
+    expect(find.text('本章已播完'), findsOneWidget);
+  });
+
+  testWidgets('buffers the next chapter silently and reuses its player', (
     tester,
   ) async {
     final session = _Session();
     await _mount(tester, session);
-    session.players.first.emitCompleted();
+    final current = session.players.single;
+    current.emitPosition(const Duration(seconds: 100));
     await _flush(tester);
-    expect(find.byKey(const Key('audio_advance_banner')), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('audio_advance_cancel')));
+    expect(session.players, hasLength(2));
+    final prepared = session.players.last;
+    expect(prepared.isCreated, true);
+    expect(prepared.isPlaying, false);
+    expect(current.isPlaying, true);
+    expect(session.store.entry?['chapterId'], '1');
+    current.emitPosition(const Duration(seconds: 110));
     await _flush(tester);
+    expect(session.requests.where((r) => r == '2:0'), hasLength(1));
+    current.emitCompleted();
+    await _flush(tester);
+    expect(session.players, hasLength(2));
+    expect(current.disposed, true);
+    expect(prepared.isPlaying, true);
+    expect(prepared.keys, hasLength(1));
+    expect(session.store.entry?['chapterId'], '2');
     expect(find.byKey(const Key('audio_advance_banner')), findsNothing);
+  });
 
-    // 取消之后即使等过倒计时窗口，也不能自己跳章。
-    await tester.pump(const Duration(seconds: 5));
+  testWidgets(
+    'a warm player error during handoff falls back to a fresh player',
+    (tester) async {
+      final release = Completer<void>();
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+      var playersCreated = 0;
+      final session = _Session(
+        factory: () =>
+            _AudioPlayer(releaseGate: playersCreated++ == 0 ? release : null),
+      );
+      await _mount(tester, session);
+      final current = session.players.single;
+      current.emitPosition(const Duration(seconds: 100));
+      await _flush(tester);
+      final warm = session.players.last;
+      expect(warm.isCreated, isTrue);
+      current.emitCompleted();
+      await _flush(tester);
+      warm.pendingError = const NativePlaybackException('warm source failed');
+      release.complete();
+      await _flush(tester);
+
+      expect(warm.disposed, isTrue);
+      expect(session.players, hasLength(3));
+      expect(session.players.last.isPlaying, isTrue);
+      expect(
+        session.requests.where((request) => request == '2:0'),
+        hasLength(2),
+      );
+    },
+  );
+
+  testWidgets('a failed preload retries normally at the chapter boundary', (
+    tester,
+  ) async {
+    var nextRequests = 0;
+    final session = _Session(
+      loader: (id, {toneId}) async {
+        if (id == '2' && nextRequests++ == 0) {
+          throw StateError('temporary preloading failure');
+        }
+        return _source(id, toneId);
+      },
+    );
+    await _mount(tester, session);
+    final current = session.players.single;
+    current.emitPosition(const Duration(seconds: 100));
     await _flush(tester);
-    expect(session.players, hasLength(1));
-    expect(find.text('本章已播完'), findsOneWidget);
+    expect(session.players.last.disposed, true);
+    expect(current.isPlaying, true);
+    expect(find.byKey(const ValueKey('audio-retry')), findsNothing);
+    current.emitCompleted();
+    await _flush(tester);
+    expect(nextRequests, 2);
+    expect(session.players.last.isPlaying, true);
+    expect(session.store.entry?['chapterId'], '2');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('selecting another chapter discards the prepared next chapter', (
+    tester,
+  ) async {
+    final session = _Session();
+    await _mount(tester, session);
+    session.players.first.emitPosition(const Duration(seconds: 100));
+    await _flush(tester);
+    final prepared = session.players.last;
+    await tester.tap(find.byTooltip('目录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('audio-chapter-2')));
+    await _flush(tester);
+    expect(prepared.disposed, true);
+    expect(prepared.isPlaying, false);
+    expect(session.players.last.isPlaying, true);
+    expect(session.store.entry?['chapterId'], '3');
+  });
+
+  testWidgets(
+    'a pending preload shares its source with immediate advancement',
+    (tester) async {
+      final nextSource = Completer<AudioSource>();
+      final session = _Session(
+        loader: (id, {toneId}) =>
+            id == '2' ? nextSource.future : Future.value(_source(id, toneId)),
+      );
+      await _mount(tester, session);
+      final current = session.players.single;
+      current.emitPosition(const Duration(seconds: 100));
+      await _flush(tester);
+      final pending = session.players.last;
+      current.emitCompleted();
+      await _flush(tester);
+      expect(pending.disposed, true);
+      expect(session.requests.where((r) => r == '2:0'), hasLength(1));
+      nextSource.complete(_source('2', '0'));
+      await _flush(tester);
+      expect(pending.calls, isNot(contains('created')));
+      expect(session.players.last.isPlaying, true);
+      expect(session.store.entry?['chapterId'], '2');
+      expect(session.requests.where((r) => r == '2:0'), hasLength(1));
+    },
+  );
+
+  testWidgets('leaving during preloading disposes the silent player', (
+    tester,
+  ) async {
+    final nextSource = Completer<AudioSource>();
+    final session = _Session(
+      loader: (id, {toneId}) =>
+          id == '2' ? nextSource.future : Future.value(_source(id, toneId)),
+    );
+    await _mount(tester, session);
+    session.players.first.emitPosition(const Duration(seconds: 100));
+    await _flush(tester);
+    expect(session.players, hasLength(2));
+    final prepared = session.players.last;
+    await _unmount(tester);
+    nextSource.complete(_source('2', '0'));
+    await _flush(tester);
+    expect(prepared.disposed, true);
+    expect(prepared.calls, isNot(contains('created')));
+    expect(prepared.isPlaying, false);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(
@@ -1088,7 +1279,18 @@ Future<void> _mount(
 class _AudioPlayer extends ControlledNativePlayer {
   final keys = <String>[];
 
+  Object? pendingError;
+
+  @override
+  Object? get lastError => pendingError ?? super.lastError;
+
   _AudioPlayer({super.createGate, super.releaseGate});
+
+  @override
+  Future<void> reopen(String cdnUrl, String keyHex) async {
+    calls.add('reopen:$cdnUrl');
+    emitPosition(Duration.zero);
+  }
 
   @override
   Future<int> create(String cdnUrl, String keyHex, {int? startMs}) {
