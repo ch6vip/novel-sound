@@ -20,10 +20,15 @@ class FanqieLibraryImport {
   final Map<String, Map<String, dynamic>> _positions = {};
   final Set<String> _shelfIds = {};
   final Set<String> _deletedShelfIds = {};
+  final Set<String> _shelfIdsWithoutType = {};
   bool _hasShelfSource = false;
   bool _shelfSourceFailed = false;
+  bool _shelfSourceIncomplete = false;
+  int _deletedShelfRecords = 0;
+  int _camelCaseShelfRecords = 0;
   int received = 0;
   int failed = 0;
+  int incomplete = 0;
   int skipped = 0;
 
   static bool _isShelfResource(Object? resource) =>
@@ -36,14 +41,25 @@ class FanqieLibraryImport {
 
   void addSource(Map<String, dynamic> source) {
     final resource = source['resource'];
-    if (source['status'] != 'received') {
+    final status = source['status'];
+    if (status == 'received') {
+      received++;
+    } else if (status == 'incomplete') {
+      // 采集层已判定这一来源不完整（分页未走完、上游声明快照不全）。已收到
+      // 的记录仍然可用，但整次导入必须显示为部分导入，不能当成完整书架。
+      incomplete++;
+      if (_isShelfResource(resource)) _shelfSourceIncomplete = true;
+    } else {
       failed++;
       if (_isShelfResource(resource)) _shelfSourceFailed = true;
       return;
     }
-    received++;
     final payload = source['payload'];
-    if (payload is! Map || !const [0, '0'].contains(payload['code'])) {
+    if (payload is! Map) {
+      if (_isShelfResource(resource)) _shelfSourceFailed = true;
+      return;
+    }
+    if (!const [0, '0'].contains(payload['code'])) {
       if (_isShelfResource(resource)) _shelfSourceFailed = true;
       return;
     }
@@ -72,15 +88,14 @@ class FanqieLibraryImport {
             visit(item);
           }
         } else if (value is Map) {
+          final id = _id(value['book_id_str']) ?? _id(value['book_id']);
           if (value.containsKey('book_type') && value['book_type'] != null) {
             if (!_novel(value) || _isDeleted(value)) {
               skipped++;
-              if (_novel(value) && _isDeleted(value)) {
-                final id = _id(value['book_id_str']) ?? _id(value['book_id']);
-                if (id != null) {
-                  _deletedShelfIds.add(id);
-                  _shelfIds.remove(id);
-                }
+              if (_novel(value) && _isDeleted(value) && id != null) {
+                _deletedShelfIds.add(id);
+                _shelfIds.remove(id);
+                _deletedShelfRecords++;
               }
               return;
             }
@@ -91,13 +106,24 @@ class FanqieLibraryImport {
             final record = _include(value);
             if (record != null) {
               final id = record['id'] as String;
-              if (!_deletedShelfIds.contains(id)) {
-                _shelfIds.add(id);
-              }
+              // 最后一次观察优先：先读到删除标记、随后在文件夹里又读到仍在
+              // 书架的书，不能被前一个标记永久排除。
+              _deletedShelfIds.remove(id);
+              _shelfIds.add(id);
               final time = _time(value);
               if (time > (record['time'] as int)) record['time'] = time;
             }
             return;
+          }
+          // 带作品 ID 却没有 book_type：上游确实给了这本书，但判不出它是不是
+          // 小说。计数并交给界面显示「部分导入」，不能静默丢。
+          if (id != null) {
+            _shelfIdsWithoutType.add(id);
+          } else if (value.containsKey('bookId') ||
+              value.containsKey('bookType')) {
+            // 整条记录都不在已知字段名里：它不会进书架，也不能进历史，
+            // 至少要把条数告诉用户。
+            _camelCaseShelfRecords++;
           }
           for (final entry in value.entries) {
             final key = entry.key.toString().toLowerCase();
@@ -199,6 +225,23 @@ class FanqieLibraryImport {
   bool get hasShelfSource => _hasShelfSource;
 
   bool get shelfSourceFailed => _shelfSourceFailed;
+
+  /// 书架来源有一次没走完（分页中断或上游声明快照不完整）。
+  bool get shelfSourceIncomplete => _shelfSourceIncomplete;
+
+  /// 书架响应里带作品 ID、却没有可识别的类型字段，因此没有计入书架的数量。
+  /// 这个数字是「导入变少」最直接的线索，必须能被用户看到。
+  int get shelfRecordsMissingType => _shelfIdsWithoutType.length;
+
+  /// 书架来源里带删除标记、被排除在书架之外的作品数。
+  int get deletedShelfRecords => _deletedShelfRecords;
+
+  /// 书架响应里整条记录都不在已知字段名下（如 bookId / bookType）的条数。
+  int get unrecognizedShelfRecords => _camelCaseShelfRecords;
+
+  /// 书架数据是否可以作为完整结果呈现。
+  bool get shelfSourceComplete =>
+      _hasShelfSource && !_shelfSourceFailed && !_shelfSourceIncomplete;
 
   List<Map<String, dynamic>> get shelfRecords => [
     for (final record in records)

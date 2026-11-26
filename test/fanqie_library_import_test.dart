@@ -311,4 +311,62 @@ void main() {
       expect(parser.records.map((r) => r['id']), ['201']);
     },
   );
+  test(
+    'shelf entries without a type field are counted instead of dropped silently',
+    () {
+      final parser = FanqieLibraryImport();
+      parser.addSource(
+        source('shelf_list', {
+          'book_shelf_info_all': [
+            {'book_id': '101', 'book_type': 0, 'book_name': 'Typed'},
+            {'book_id': '201', 'book_name': 'Untyped'},
+            {'bookId': '202', 'bookType': 0, 'bookName': 'CamelCase'},
+          ],
+        }),
+      );
+      // 只有带类型的记录可以进书架；其余不能被当成小说，但必须留下数字。
+      expect(parser.shelfIds, {'101'});
+      expect(parser.shelfRecordsMissingType, 1);
+      expect(parser.unrecognizedShelfRecords, 1);
+      expect(parser.shelfSourceIncomplete, isFalse);
+    },
+  );
+  test('a live shelf entry after a tombstone returns to the shelf', () {
+    final parser = FanqieLibraryImport();
+    parser.addSource(
+      source('shelf_list', {
+        'book_shelf_info_all': [
+          {'book_id': '101', 'book_type': 0, 'is_delete': 1},
+        ],
+      }),
+    );
+    parser.addSource(
+      source('folder_detail', {
+        'book_list': [
+          {'book_id': '101', 'book_type': 0, 'book_name': 'Still Shelved'},
+        ],
+      }),
+    );
+    expect(parser.shelfIds, {'101'});
+    expect(parser.deletedShelfRecords, 1);
+  });
+  test(
+    'an incomplete shelf source keeps its records but cannot pass as complete',
+    () {
+      final parser = FanqieLibraryImport();
+      parser.addSource({
+        ...source('shelf_list', {
+          'book_shelf_info_all': [
+            {'book_id': '101', 'book_type': 0, 'book_name': 'Partial'},
+          ],
+        }),
+        'status': 'incomplete',
+      });
+      expect(parser.shelfIds, {'101'});
+      expect(parser.shelfSourceIncomplete, isTrue);
+      expect(parser.shelfSourceComplete, isFalse);
+      expect(parser.incomplete, 1);
+      expect(parser.failed, 0);
+    },
+  );
 }

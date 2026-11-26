@@ -19,6 +19,10 @@ class FanqieImportPreview {
   final Set<String> shelfIds;
   final bool hasShelfSource;
   final bool shelfSourceFailed;
+  final bool shelfSourceIncomplete;
+  final int shelfRecordsMissingType;
+  final int deletedShelfRecords;
+  final int unrecognizedShelfRecords;
 
   const FanqieImportPreview(
     this.records,
@@ -28,7 +32,20 @@ class FanqieImportPreview {
     this.shelfIds = const {},
     this.hasShelfSource = false,
     this.shelfSourceFailed = false,
+    this.shelfSourceIncomplete = false,
+    this.shelfRecordsMissingType = 0,
+    this.deletedShelfRecords = 0,
+    this.unrecognizedShelfRecords = 0,
   });
+
+  /// 书架来源有一次没走完，或者条目被我们判不出类型。只要成立，本次导入就
+  /// 只能算部分导入，不能用完整成功的措辞。
+  bool get shelfPartial =>
+      hasShelfSource &&
+      (shelfSourceFailed ||
+          shelfSourceIncomplete ||
+          shelfRecordsMissingType > 0 ||
+          unrecognizedShelfRecords > 0);
 
   List<Map<String, dynamic>> get shelfRecords => [
     for (final record in records)
@@ -148,6 +165,10 @@ class FanqieLibraryImportService {
       shelfIds: parser.shelfIds,
       hasShelfSource: parser.hasShelfSource,
       shelfSourceFailed: parser.shelfSourceFailed,
+      shelfSourceIncomplete: parser.shelfSourceIncomplete,
+      shelfRecordsMissingType: parser.shelfRecordsMissingType,
+      deletedShelfRecords: parser.deletedShelfRecords,
+      unrecognizedShelfRecords: parser.unrecognizedShelfRecords,
     );
   }
 

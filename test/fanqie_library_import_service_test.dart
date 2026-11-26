@@ -235,4 +235,60 @@ void main() {
       },
     );
   });
+
+  test(
+    'preview keeps every partial shelf signal so the page cannot claim full success',
+    () {
+      const clean = FanqieImportPreview(
+        [],
+        0,
+        0,
+        0,
+        shelfIds: {'1'},
+        hasShelfSource: true,
+      );
+      expect(clean.shelfPartial, isFalse);
+
+      for (final partial in [
+        const FanqieImportPreview(
+          [],
+          0,
+          0,
+          0,
+          shelfIds: {'1'},
+          hasShelfSource: true,
+          shelfSourceFailed: true,
+        ),
+        const FanqieImportPreview(
+          [],
+          0,
+          0,
+          0,
+          shelfIds: {'1'},
+          hasShelfSource: true,
+          shelfSourceIncomplete: true,
+        ),
+        const FanqieImportPreview(
+          [],
+          0,
+          0,
+          0,
+          shelfIds: {'1'},
+          hasShelfSource: true,
+          shelfRecordsMissingType: 2,
+        ),
+        const FanqieImportPreview(
+          [],
+          0,
+          0,
+          0,
+          shelfIds: {'1'},
+          hasShelfSource: true,
+          unrecognizedShelfRecords: 2,
+        ),
+      ]) {
+        expect(partial.shelfPartial, isTrue);
+      }
+    },
+  );
 }

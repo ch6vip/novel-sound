@@ -102,8 +102,23 @@ class _Collection {
         await _paged('history', type: type);
       }
       await _paged('folder_list');
-      for (final folder in folders.toList()) {
+      // 文件夹可以嵌套：folder_detail 会返回新的子文件夹 ID，必须继续入队。
+      // 以前这里用 folders.toList() 快照一次，深层文件夹里的书永远采不到。
+      final visitedFolders = <String>{};
+      final folderQueue = folders.toList();
+      while (folderQueue.isNotEmpty) {
+        final folder = folderQueue.removeAt(0);
+        if (!visitedFolders.add(folder)) continue;
+        if (visitedFolders.length > 500) {
+          stopReason = '文件夹数量超过 500 上限；其余文件夹未采集';
+          break;
+        }
         await _paged('folder_detail', folder: folder);
+        for (final child in folders.toList()) {
+          if (!visitedFolders.contains(child) && !folderQueue.contains(child)) {
+            folderQueue.add(child);
+          }
+        }
       }
       // Query exact identities instead of guessing progress timestamp paging.
       for (final entry in books.entries.toList()) {
@@ -197,7 +212,7 @@ class _Collection {
       'knownLimits': [
         '仅采集固定白名单读取接口，不含正文、账号凭证或上游写操作',
         '接口失败、未授权、分页上限均单独记录，不表示账号无数据',
-        '书架 server_time=0 单次快照保留 is_all，不把服务端版本当分页游标',
+        '书架为 server_time=0 单次快照；响应声明 is_all=false 时该来源记为 incomplete',
         'progress_list 为单次观察；按采集到的作品 ID 批量补查进度',
         '原始响应在 parts 列出的 JSON 分卷内；sources 是响应索引，不含正文载荷',
         '续取仅补充公开书籍详情，不刷新之前采集的账号快照',
@@ -305,13 +320,26 @@ class _Collection {
           result['upstream_status'] == 200 &&
           payload is Map &&
           (payload['code'] == 0 || payload['code'] == '0');
+      // 书架列表/完整信息是游标式快照：上游可以用 is_all=false 明确表示这次
+      // 没给全。以前这个字段只写在一句注释里，部分快照被当成了完整书架。
+      final shelfData = payload is Map ? payload['data'] : null;
+      final snapshotPartial =
+          success &&
+          (resource == 'shelf_list' || resource == 'shelf_info') &&
+          shelfData is Map &&
+          shelfData['is_all'] == false;
       await _add({
         ...source,
-        'status': success ? 'received' : 'failed',
+        'status': !success
+            ? 'failed'
+            : snapshotPartial
+            ? 'incomplete'
+            : 'received',
         'upstreamStatus': result['upstream_status'],
         if (result['error'] is String) 'adapterError': _clean(result['error']),
         'payload': _clean(payload),
         if (!success) 'note': '接口未成功；保留响应供后续分析，未当成空书架',
+        if (snapshotPartial) 'note': '上游声明本次书架快照不完整（is_all=false），保留已收到的记录',
       });
       if (!success) return null;
       _identities(payload, type);
