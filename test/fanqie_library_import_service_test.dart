@@ -291,4 +291,60 @@ void main() {
       }
     },
   );
+  test(
+    'capture coverage marks an otherwise valid shelf source incomplete',
+    () async {
+      final capture = FanqieLibraryCapture({
+        'parts': <String>[],
+        'shelfCoverage': {
+          'complete': false,
+          'reasons': ['文件夹遍历未完成'],
+        },
+        'sources': <Map<String, dynamic>>[
+          _source('folder_detail', {
+            'book_list': [
+              {'book_id': '1', 'book_type': 0, 'book_name': 'Partial shelf'},
+            ],
+          }),
+        ],
+      });
+
+      final preview = await FanqieLibraryImportService().prepare(
+        capture,
+        BackendRequest(),
+        (_) {},
+      );
+
+      expect(preview.shelfCount, 1);
+      expect(preview.shelfSourceIncomplete, isTrue);
+      expect(preview.shelfCoverageReasons, ['文件夹遍历未完成']);
+      expect(preview.shelfPartial, isTrue);
+    },
+  );
+  test(
+    'a complete shelf_info overrides a stale capture coverage failure',
+    () async {
+      final capture = FanqieLibraryCapture({
+        'parts': <String>[],
+        'shelfCoverage': {'complete': false},
+        'sources': <Map<String, dynamic>>[
+          _source('shelf_info', {
+            'book_shelf_info': [
+              {'book_id': '1', 'book_type': 0, 'book_name': 'Complete shelf'},
+            ],
+          }),
+        ],
+      });
+
+      final preview = await FanqieLibraryImportService().prepare(
+        capture,
+        BackendRequest(),
+        (_) {},
+      );
+
+      expect(preview.shelfCount, 1);
+      expect(preview.shelfSourceIncomplete, isFalse);
+      expect(preview.shelfPartial, isFalse);
+    },
+  );
 }

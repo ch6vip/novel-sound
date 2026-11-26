@@ -84,6 +84,8 @@ class _Collection {
   int pendingBytes = 0;
   int redactedFields = 0;
   String stopReason = '';
+  bool? shelfInfoComplete;
+  final shelfCoverageReasons = <String>[];
 
   Future<FanqieLibraryCapture> collect() async {
     try {
@@ -111,6 +113,7 @@ class _Collection {
         if (!visitedFolders.add(folder)) continue;
         if (visitedFolders.length > 500) {
           stopReason = '文件夹数量超过 500 上限；其余文件夹未采集';
+          _markShelfIncomplete(stopReason);
           break;
         }
         await _paged('folder_detail', folder: folder);
@@ -139,17 +142,22 @@ class _Collection {
       }
     } on BackendRequestAborted {
       stopReason = '用户取消；已收到的数据保留，尚未请求的部分没有采集';
+      _markShelfIncomplete(stopReason);
     } on _CaptureLimit catch (error) {
       stopReason = error.message;
+      _markShelfIncomplete(stopReason);
     } on _CaptureStorage {
       stopReason = '本机分卷保存失败；保留已保存的分卷，部分响应未落盘';
+      _markShelfIncomplete(stopReason);
     } on _IdentityChanged {
       stopReason = '采集设备不一致，已停止；此文件是部分采集';
+      _markShelfIncomplete(stopReason);
     }
     return _finish();
   }
 
   Future<FanqieLibraryCapture> resumeMetadata(FanqieLibraryCapture seed) async {
+    _restoreShelfCoverage(seed);
     try {
       parts.addAll(seed.parts);
       usedBytes = seed.document['totalResponseBytes'] as int? ?? 0;
@@ -181,10 +189,13 @@ class _Collection {
       }
     } on BackendRequestAborted {
       stopReason = '用户取消；已保存的分卷保留，可继续补取详情';
+      _markShelfIncomplete(stopReason);
     } on _CaptureLimit catch (error) {
       stopReason = error.message;
+      _markShelfIncomplete(stopReason);
     } on _CaptureStorage {
       stopReason = '本机分卷保存失败；保留已保存的分卷，部分响应未落盘';
+      _markShelfIncomplete(stopReason);
     }
     return _finish(resumedFrom: seed.document['createdAt']);
   }
@@ -209,10 +220,15 @@ class _Collection {
       'parts': parts,
       'totalResponseBytes': usedBytes,
       'credentialFieldsRemoved': redactedFields,
+      'shelfCoverage': {
+        'authoritativeResource': 'shelf_info',
+        'complete': shelfInfoComplete ?? false,
+        'reasons': List<String>.unmodifiable(shelfCoverageReasons),
+      },
       'knownLimits': [
         '仅采集固定白名单读取接口，不含正文、账号凭证或上游写操作',
         '接口失败、未授权、分页上限均单独记录，不表示账号无数据',
-        '书架为 server_time=0 单次快照；响应声明 is_all=false 时该来源记为 incomplete',
+        '书架以 shelf_info 为权威全量来源；shelf_list 仅作补充，其 is_all=false 不覆盖完整 shelf_info',
         'progress_list 为单次观察；按采集到的作品 ID 批量补查进度',
         '原始响应在 parts 列出的 JSON 分卷内；sources 是响应索引，不含正文载荷',
         '续取仅补充公开书籍详情，不刷新之前采集的账号快照',
@@ -289,6 +305,7 @@ class _Collection {
     String? folder,
   }) async {
     _check();
+    if (resource == 'shelf_info') shelfInfoComplete = false;
     progress('正在采集 $resource，已保存 ${sources.length} 个响应');
     final source = <String, dynamic>{
       'resource': resource,
@@ -328,6 +345,19 @@ class _Collection {
           (resource == 'shelf_list' || resource == 'shelf_info') &&
           shelfData is Map &&
           shelfData['is_all'] == false;
+      if (resource == 'shelf_info') {
+        final recognizedSnapshot = _isRecognizedShelfSnapshot(shelfData);
+        shelfInfoComplete = success && !snapshotPartial && recognizedSnapshot;
+        if (!shelfInfoComplete!) {
+          _markShelfIncomplete(
+            !success
+                ? 'shelf_info 接口失败'
+                : snapshotPartial
+                ? 'shelf_info 声明本次快照不完整'
+                : 'shelf_info 结构无法确认完整',
+          );
+        }
+      }
       await _add({
         ...source,
         'status': !success
@@ -347,12 +377,24 @@ class _Collection {
     } on BackendRequestAborted {
       rethrow;
     } on _CaptureLimit {
+      if (resource == 'shelf_info') {
+        shelfInfoComplete = false;
+        _markShelfIncomplete('书架全量响应未能保存');
+      }
       rethrow;
     } on _IdentityChanged {
       rethrow;
     } on _CaptureStorage {
+      if (resource == 'shelf_info') {
+        shelfInfoComplete = false;
+        _markShelfIncomplete('书架全量响应未能保存');
+      }
       rethrow;
     } on Exception {
+      if (resource == 'shelf_info') {
+        shelfInfoComplete = false;
+        _markShelfIncomplete('shelf_info 读取失败或响应无效');
+      }
       await _add({
         ...source,
         'status': 'failed',
@@ -435,6 +477,48 @@ class _Collection {
 
   static int? _integer(dynamic value) =>
       value is int ? value : int.tryParse('$value');
+
+  static const _shelfSnapshotKeys = {
+    'book_shelf_info',
+    'bookShelfInfo',
+    'book_shelf_info_all',
+    'bookShelfInfoAll',
+    'book_list',
+    'bookList',
+  };
+
+  static bool _isRecognizedShelfSnapshot(dynamic data) {
+    if (data is List) return true;
+    if (data is! Map) return false;
+    return _shelfSnapshotKeys.any((key) => data[key] is List);
+  }
+
+  void _markShelfIncomplete(String reason) {
+    if (shelfInfoComplete == true) return;
+    shelfInfoComplete ??= false;
+    if (reason.isNotEmpty && !shelfCoverageReasons.contains(reason)) {
+      shelfCoverageReasons.add(reason);
+    }
+  }
+
+  void _restoreShelfCoverage(FanqieLibraryCapture seed) {
+    shelfInfoComplete = seed.shelfCoverageComplete;
+    shelfCoverageReasons
+      ..clear()
+      ..addAll(seed.shelfCoverageReasons);
+    if (shelfInfoComplete != null) return;
+    final infoSources = seed.sources.where(
+      (source) => source['resource'] == 'shelf_info',
+    );
+    if (infoSources.any((source) => source['status'] == 'received')) {
+      shelfInfoComplete = true;
+    } else if (infoSources.any(
+      (source) => const ['failed', 'incomplete'].contains(source['status']),
+    )) {
+      shelfInfoComplete = false;
+    }
+  }
+
   static String? _id(dynamic value) {
     if (value is! String && value is! int) return null;
     final text = '$value';

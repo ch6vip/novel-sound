@@ -21,20 +21,44 @@ class FanqieLibraryImport {
   final Set<String> _shelfIds = {};
   final Set<String> _deletedShelfIds = {};
   final Set<String> _shelfIdsWithoutType = {};
+  final Set<String> _shelfInfoIdsWithInferredNovelType = {};
   bool _hasShelfSource = false;
   bool _shelfSourceFailed = false;
   bool _shelfSourceIncomplete = false;
+  bool _shelfInfoComplete = false;
   int _deletedShelfRecords = 0;
   int _camelCaseShelfRecords = 0;
+  int _shelfInfoCamelCaseRecords = 0;
   int received = 0;
   int failed = 0;
   int incomplete = 0;
   int skipped = 0;
 
-  static bool _isShelfResource(Object? resource) =>
+  static bool _affectsShelfCoverage(Object? resource) =>
+      resource == 'folder_list' ||
+      resource == 'folder_detail' ||
+      resource == 'shelf_list' ||
+      resource == 'shelf_info';
+
+  static bool _isShelfRecordResource(Object? resource) =>
       resource == 'shelf_list' ||
       resource == 'shelf_info' ||
       resource == 'folder_detail';
+
+  static const _shelfSnapshotKeys = {
+    'book_shelf_info',
+    'bookShelfInfo',
+    'book_shelf_info_all',
+    'bookShelfInfoAll',
+    'book_list',
+    'bookList',
+  };
+
+  static bool _hasRecognizedShelfData(dynamic data) {
+    if (data is List) return true;
+    if (data is! Map) return false;
+    return _shelfSnapshotKeys.any((key) => data[key] is List);
+  }
 
   static bool _isDeleted(Map raw) =>
       raw['is_delete'] == true || raw['is_delete'] == 1;
@@ -48,22 +72,28 @@ class FanqieLibraryImport {
       // 采集层已判定这一来源不完整（分页未走完、上游声明快照不全）。已收到
       // 的记录仍然可用，但整次导入必须显示为部分导入，不能当成完整书架。
       incomplete++;
-      if (_isShelfResource(resource)) _shelfSourceIncomplete = true;
+      if (_affectsShelfCoverage(resource)) _shelfSourceIncomplete = true;
     } else {
       failed++;
-      if (_isShelfResource(resource)) _shelfSourceFailed = true;
+      if (_affectsShelfCoverage(resource)) _shelfSourceFailed = true;
       return;
     }
     final payload = source['payload'];
     if (payload is! Map) {
-      if (_isShelfResource(resource)) _shelfSourceFailed = true;
+      if (_affectsShelfCoverage(resource)) _shelfSourceFailed = true;
       return;
     }
     if (!const [0, '0'].contains(payload['code'])) {
-      if (_isShelfResource(resource)) _shelfSourceFailed = true;
+      if (_affectsShelfCoverage(resource)) _shelfSourceFailed = true;
       return;
     }
     final data = payload['data'];
+    if (resource == 'folder_list') return;
+    if (resource == 'shelf_info' &&
+        status == 'received' &&
+        _hasRecognizedShelfData(data)) {
+      _shelfInfoComplete = true;
+    }
     if (resource == 'book_detail') {
       if (data is Map) _metadata(data);
       return;
@@ -80,7 +110,7 @@ class FanqieLibraryImport {
         final time = _time(raw);
         if (time > (record['time'] as int)) record['time'] = time;
       }
-    } else if (_isShelfResource(resource)) {
+    } else if (_isShelfRecordResource(resource)) {
       _hasShelfSource = true;
       void visit(dynamic value) {
         if (value is List) {
@@ -116,14 +146,36 @@ class FanqieLibraryImport {
             return;
           }
           // 带作品 ID 却没有 book_type：上游确实给了这本书，但判不出它是不是
-          // 小说。计数并交给界面显示「部分导入」，不能静默丢。
+          // 小说。`bookshelf/info` 的标准书目条目会省略该字段；采集层的类型
+          // 缺省也是 0，这里按同样规则归一，并保留推断数量供界面披露。
           if (id != null) {
+            if (resource == 'shelf_info') {
+              if (_isDeleted(value)) {
+                skipped++;
+                _deletedShelfIds.add(id);
+                _shelfIds.remove(id);
+                _deletedShelfRecords++;
+                return;
+              }
+              _shelfInfoIdsWithInferredNovelType.add(id);
+              final record = _include(value);
+              if (record != null) {
+                _deletedShelfIds.remove(id);
+                _shelfIds.add(id);
+                final time = _time(value);
+                if (time > (record['time'] as int)) record['time'] = time;
+              }
+              return;
+            }
             _shelfIdsWithoutType.add(id);
           } else if (value.containsKey('bookId') ||
               value.containsKey('bookType')) {
             // 整条记录都不在已知字段名里：它不会进书架，也不能进历史，
             // 至少要把条数告诉用户。
             _camelCaseShelfRecords++;
+            if (resource == 'shelf_info') {
+              _shelfInfoCamelCaseRecords++;
+            }
           }
           for (final entry in value.entries) {
             final key = entry.key.toString().toLowerCase();
@@ -224,24 +276,35 @@ class FanqieLibraryImport {
 
   bool get hasShelfSource => _hasShelfSource;
 
-  bool get shelfSourceFailed => _shelfSourceFailed;
+  /// `shelf_info` 是官方完整书架名单；它成功返回标准结构后，`shelf_list`
+  /// 的增量残缺或文件夹遍历失败不应再否定已经完整的书架覆盖。
+  bool get shelfInfoComplete => _shelfInfoComplete;
+
+  bool get shelfSourceFailed => _shelfSourceFailed && !_shelfInfoComplete;
 
   /// 书架来源有一次没走完（分页中断或上游声明快照不完整）。
-  bool get shelfSourceIncomplete => _shelfSourceIncomplete;
+  bool get shelfSourceIncomplete =>
+      _shelfSourceIncomplete && !_shelfInfoComplete;
 
   /// 书架响应里带作品 ID、却没有可识别的类型字段，因此没有计入书架的数量。
   /// 这个数字是「导入变少」最直接的线索，必须能被用户看到。
-  int get shelfRecordsMissingType => _shelfIdsWithoutType.length;
+  int get shelfRecordsMissingType =>
+      _shelfInfoComplete ? 0 : _shelfIdsWithoutType.length;
+
+  /// `shelf_info` 中省略 `book_type`、按小说缺省值计入书架的唯一作品数。
+  int get shelfInfoInferredNovelCount =>
+      _shelfInfoIdsWithInferredNovelType.length;
 
   /// 书架来源里带删除标记、被排除在书架之外的作品数。
   int get deletedShelfRecords => _deletedShelfRecords;
 
   /// 书架响应里整条记录都不在已知字段名下（如 bookId / bookType）的条数。
-  int get unrecognizedShelfRecords => _camelCaseShelfRecords;
+  int get unrecognizedShelfRecords =>
+      _shelfInfoComplete ? _shelfInfoCamelCaseRecords : _camelCaseShelfRecords;
 
   /// 书架数据是否可以作为完整结果呈现。
   bool get shelfSourceComplete =>
-      _hasShelfSource && !_shelfSourceFailed && !_shelfSourceIncomplete;
+      _hasShelfSource && !shelfSourceFailed && !shelfSourceIncomplete;
 
   List<Map<String, dynamic>> get shelfRecords => [
     for (final record in records)

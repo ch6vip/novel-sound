@@ -355,18 +355,88 @@ void main() {
     () {
       final parser = FanqieLibraryImport();
       parser.addSource({
-        ...source('shelf_list', {
-          'book_shelf_info_all': [
+        ...source('shelf_info', {
+          'book_shelf_info': [
             {'book_id': '101', 'book_type': 0, 'book_name': 'Partial'},
+            {'book_id': '201', 'book_name': 'Missing type'},
           ],
         }),
         'status': 'incomplete',
       });
-      expect(parser.shelfIds, {'101'});
+      expect(parser.shelfIds, {'101', '201'});
+      expect(parser.shelfInfoComplete, isFalse);
       expect(parser.shelfSourceIncomplete, isTrue);
       expect(parser.shelfSourceComplete, isFalse);
+      expect(parser.shelfRecordsMissingType, 0);
+      expect(parser.shelfInfoInferredNovelCount, 1);
       expect(parser.incomplete, 1);
       expect(parser.failed, 0);
     },
   );
+  test(
+    'a complete shelf_info is authoritative over an incomplete shelf_list',
+    () {
+      final parser = FanqieLibraryImport();
+      parser.addSource({
+        ...source('shelf_list', {
+          'book_shelf_info_all': [
+            {'book_id': '201', 'book_name': 'Supplemental only'},
+          ],
+        }),
+        'status': 'incomplete',
+      });
+      parser.addSource(
+        source('shelf_info', {
+          'book_shelf_info': [
+            {'book_id': '101', 'book_type': 0, 'book_name': 'First'},
+            {'book_id': '102', 'book_type': 0, 'book_name': 'Second'},
+          ],
+        }),
+      );
+
+      expect(parser.shelfInfoComplete, isTrue);
+      expect(parser.shelfSourceIncomplete, isFalse);
+      expect(parser.shelfSourceFailed, isFalse);
+      expect(parser.shelfSourceComplete, isTrue);
+      expect(parser.shelfIds, {'101', '102'});
+      // 补充来源里缺类型的记录不能否定权威来源的完整覆盖。
+      expect(parser.shelfRecordsMissingType, 0);
+    },
+  );
+  test('metadata-only shelf_info entries are imported as novels', () {
+    final parser = FanqieLibraryImport();
+    parser.addSource(
+      source('shelf_info', {
+        'book_shelf_info': [
+          {'book_id': '101', 'book_type': 0},
+          {'book_id': '201', 'add_shelf_time': 100},
+          {'book_id': '202', 'book_type': 1, 'book_name': 'Audio'},
+        ],
+      }),
+    );
+
+    expect(parser.shelfInfoComplete, isTrue);
+    expect(parser.shelfSourceIncomplete, isFalse);
+    expect(parser.shelfIds, {'101', '201'});
+    expect(parser.shelfRecordsMissingType, 0);
+    expect(parser.shelfInfoInferredNovelCount, 1);
+  });
+
+  test('metadata-only shelf_info keeps the complete large shelf', () {
+    final parser = FanqieLibraryImport();
+    parser.addSource(
+      source('shelf_info', {
+        'book_shelf_info': [
+          for (var index = 0; index < 2100; index++)
+            {'book_id': '${100000 + index}', 'add_shelf_time': index},
+        ],
+      }),
+    );
+
+    expect(parser.shelfIds, hasLength(2100));
+    expect(parser.shelfRecords, hasLength(2100));
+    expect(parser.shelfInfoInferredNovelCount, 2100);
+    expect(parser.shelfRecordsMissingType, 0);
+    expect(parser.shelfSourceComplete, isTrue);
+  });
 }

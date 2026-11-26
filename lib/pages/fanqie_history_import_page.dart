@@ -299,16 +299,19 @@ class _FanqieHistoryImportPageState extends State<FanqieHistoryImportPage> {
   }
 
   String _shelfDiagnostics(FanqieImportPreview parsed) {
-    final notes = <String>[
+    final notes = <String>{
       if (parsed.shelfSourceFailed) '书架来源有失败',
       if (parsed.shelfSourceIncomplete) '书架来源未走完分页',
+      ...parsed.shelfCoverageReasons,
       if (parsed.shelfRecordsMissingType > 0)
         '${parsed.shelfRecordsMissingType} 条书目缺少类型字段，未计入书架',
+      if (parsed.shelfInfoInferredNovelCount > 0)
+        '${parsed.shelfInfoInferredNovelCount} 条书架记录省略类型字段，已按小说导入',
       if (parsed.unrecognizedShelfRecords > 0)
         '${parsed.unrecognizedShelfRecords} 条书目字段名无法识别，未导入',
       if (parsed.deletedShelfRecords > 0)
         '${parsed.deletedShelfRecords} 条带删除标记',
-    ];
+    }.toList(growable: false);
     return '诊断：${notes.join('；')}。';
   }
 

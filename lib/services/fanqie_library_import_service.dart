@@ -20,7 +20,9 @@ class FanqieImportPreview {
   final bool hasShelfSource;
   final bool shelfSourceFailed;
   final bool shelfSourceIncomplete;
+  final List<String> shelfCoverageReasons;
   final int shelfRecordsMissingType;
+  final int shelfInfoInferredNovelCount;
   final int deletedShelfRecords;
   final int unrecognizedShelfRecords;
 
@@ -33,7 +35,9 @@ class FanqieImportPreview {
     this.hasShelfSource = false,
     this.shelfSourceFailed = false,
     this.shelfSourceIncomplete = false,
+    this.shelfCoverageReasons = const [],
     this.shelfRecordsMissingType = 0,
+    this.shelfInfoInferredNovelCount = 0,
     this.deletedShelfRecords = 0,
     this.unrecognizedShelfRecords = 0,
   });
@@ -111,6 +115,8 @@ class FanqieLibraryImportService {
     }
     final records = parser.records;
     if (records.length > 10000) throw const FormatException('小说超过 10000 本，未导入');
+    final captureShelfIncomplete =
+        capture.shelfCoverageComplete == false && !parser.shelfInfoComplete;
     var matched = 0;
     var unresolved = 0;
     var done = 0;
@@ -165,8 +171,11 @@ class FanqieLibraryImportService {
       shelfIds: parser.shelfIds,
       hasShelfSource: parser.hasShelfSource,
       shelfSourceFailed: parser.shelfSourceFailed,
-      shelfSourceIncomplete: parser.shelfSourceIncomplete,
+      shelfSourceIncomplete:
+          parser.shelfSourceIncomplete || captureShelfIncomplete,
+      shelfCoverageReasons: capture.shelfCoverageReasons,
       shelfRecordsMissingType: parser.shelfRecordsMissingType,
+      shelfInfoInferredNovelCount: parser.shelfInfoInferredNovelCount,
       deletedShelfRecords: parser.deletedShelfRecords,
       unrecognizedShelfRecords: parser.unrecognizedShelfRecords,
     );
