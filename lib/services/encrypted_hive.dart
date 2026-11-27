@@ -87,6 +87,50 @@ class EncryptedHive {
     return preserved;
   }
 
+  /// 把所有本地加密箱改名保留，用于「有加密箱、却拿不到密钥」的死锁态。
+  ///
+  /// 密钥不存在时箱里的密文再也解不开，[openBox] 的失败关闭策略会让应用永远
+  /// 停在启动失败页（「重试」点了也无效）。改名后 Hive 不再认识这些箱，应用
+  /// 能以空数据启动，密文仍留在同一目录下（`<name>.unreadable-<时间戳>.hive`）
+  /// 可人工恢复。**永不删除任何文件**；单个文件改名失败只跳过该文件。
+  ///
+  /// 返回成功改名的文件数；Hive 尚未初始化（拿不到 homePath）时返回 0。
+  /// 同步实现，与 [_quarantineUnreadableBox] 同理：可能运行在 widget 测试的
+  /// fake-async 区域里，真实的异步文件操作在那里永远不会完成。
+  static int quarantineAllEncryptedBoxes() {
+    final home = (Hive as dynamic).homePath as String?;
+    if (home == null || home.isEmpty) return 0;
+    final directory = Directory(home);
+    if (!directory.existsSync()) return 0;
+    final delimiter = Platform.isWindows ? '\\' : '/';
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    var renamed = 0;
+    for (final entity in directory.listSync(followLinks: false)) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      final lower = name.toLowerCase();
+      if (!lower.contains('_enc')) continue;
+      final isBoxFile =
+          lower.endsWith('.hive') ||
+          lower.endsWith('.hivec') ||
+          lower.endsWith('.lock');
+      if (!isBoxFile) continue;
+      final dot = name.lastIndexOf('.');
+      if (dot <= 0) continue;
+      final base = name.substring(0, dot);
+      final extension = name.substring(dot);
+      final target = '$home$delimiter$base.unreadable-$stamp$extension';
+      try {
+        entity.renameSync(target);
+        renamed += 1;
+      } on FileSystemException {
+        // 单个文件改名失败不阻断：能改的都改，剩下的下次再来。
+        continue;
+      }
+    }
+    return renamed;
+  }
+
   /// The open box, preferring the encrypted one. Callers must check
   /// [isBoxOpen] first.
   static Box<E> box<E>(HiveInterface hive, String name) =>
@@ -122,7 +166,7 @@ class EncryptedHive {
       // under a retryable bootstrap, so the user can retry once the key is
       // available and nothing is lost.
       if (_encryptedBoxOnDisk(encName)) {
-        throw StateError('加密密钥不可用，而 $encName 已存在，拒绝以明文回落');
+        throw StateError('加密密钥不可用，而 $encName 已存在，拒绝以明文回落；可在启动失败页选择「重置本地数据并重试」');
       }
       // Degraded path (tests, a first run before any key existed, a broken
       // Keystore with no encrypted data yet): plaintext legacy box, so the app
@@ -211,7 +255,7 @@ class EncryptedHive {
         throw StateError('加密密钥不可用，拒绝以明文打开 $name');
       }
       if (_encryptedBoxOnDisk(encName)) {
-        throw StateError('加密密钥不可用，而 $encName 已存在，拒绝以明文回落');
+        throw StateError('加密密钥不可用，而 $encName 已存在，拒绝以明文回落；可在启动失败页选择「重置本地数据并重试」');
       }
       return hive.openLazyBox<E>(name, compactionStrategy: strategy);
     }

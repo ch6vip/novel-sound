@@ -59,6 +59,7 @@ import 'services/fair_memory.dart';
 import 'services/connectivity_status.dart';
 import 'services/home_feed_cache.dart';
 import 'services/haptic_preferences.dart';
+import 'services/encrypted_hive.dart';
 import 'services/library_store.dart';
 import 'services/legacy_ui_notice.dart';
 import 'services/rank_cache.dart';
@@ -536,6 +537,8 @@ class AppBootstrap extends StatefulWidget {
 }
 
 class _AppBootstrapState extends State<AppBootstrap> {
+  /// 本地数据初始化抛出的异常，失败页要把它原文显示出来。
+  Object? _error;
   bool _initializing = false;
   bool _ready = false;
   bool _failed = false;
@@ -564,14 +567,52 @@ class _AppBootstrapState extends State<AppBootstrap> {
     try {
       await (widget.initializer ?? _initializeLocalData)();
       if (mounted) setState(() => _ready = true);
-    } catch (_) {
+    } catch (error) {
       // 这里不写日志：启动失败发生在持久化开启之前，而 AppLog 的写入会排到
       // 那条尚未完成的 I/O 之后（test/app_bootstrap_test.dart 的失败路径用例
-      // 因此会挂到超时）。失败本身已经由界面的重试入口与 runZonedGuarded 呈现。
-      if (mounted) setState(() => _failed = true);
+      // 因此会挂到超时）。失败本身由界面的重试入口、失败页上的异常原文与
+      // runZonedGuarded 呈现——异常原文必须留在界面上，否则「装上去打不开」
+      // 只能靠猜。
+      if (mounted) {
+        setState(() {
+          _error = error;
+          _failed = true;
+        });
+      }
     } finally {
       _initializing = false;
     }
+  }
+
+  /// 失败页的「重置本地数据」：把本地加密箱改名保留后重试启动。
+  ///
+  /// 走这条路的是「有加密箱、却拿不到密钥」的死锁态（Keystore 被清、卸载
+  /// 重装后系统/换机工具把数据目录恢复回来等）：密钥已不存在，箱里的密文
+  /// 再也解不开，而 [EncryptedHive.openBox] 的失败关闭策略会让应用永远停在
+  /// 这一屏，「重试」按钮点了也无效。改名后应用能以空数据启动，密文仍留在
+  /// 磁盘上可人工恢复——本方法不删除任何文件。
+  Future<void> _resetLocalData() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('重置本地数据？'),
+        content: const Text('本地的书架、阅读进度等数据文件会被改名保留（不会删除），应用将以空数据启动。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('重置并重试'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    EncryptedHive.quarantineAllEncryptedBoxes();
+    if (!mounted) return;
+    await _initialize();
   }
 
   @override
@@ -594,10 +635,27 @@ class _AppBootstrapState extends State<AppBootstrap> {
                   const Text('无法读取本地数据'),
                   const SizedBox(height: 8),
                   const Text('请检查设备可用空间后重试。', textAlign: TextAlign.center),
+                  if (_error != null) ...[
+                    const SizedBox(height: 12),
+                    // 把真正的异常原文显示出来：这一屏原本只吞掉错误，导致
+                    // 「装上却打不开」无从定位（第三方重打包的 APK 尤其需要）。
+                    SelectableText(
+                      _error.toString(),
+                      key: const ValueKey('bootstrap_error_detail'),
+                      maxLines: 6,
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   OutlinedButton(
                     onPressed: _initialize,
                     child: const Text('重试'),
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: _resetLocalData,
+                    child: const Text('重置本地数据并重试'),
                   ),
                 ],
               ),
