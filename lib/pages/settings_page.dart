@@ -19,6 +19,7 @@
 // - Windows keeps the existing two-pane `DesktopSettingsBody` inside the
 //   archive shell so the desktop settings workflow is unchanged.
 
+import '../services/tablet_preferences.dart';
 import 'dart:async';
 
 import 'package:cupertino_ui/cupertino_ui.dart';
@@ -76,11 +77,17 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void initState() {
     super.initState();
+    DramaFeaturePreferences.instance.enabled.addListener(_onDramaChanged);
     if (isWindowsDesktop) DesktopShellState.enterSettings();
+  }
+
+  void _onDramaChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    DramaFeaturePreferences.instance.enabled.removeListener(_onDramaChanged);
     if (isWindowsDesktop) DesktopShellState.exitSettings();
     super.dispose();
   }
@@ -110,23 +117,21 @@ class _SettingsPageState extends State<SettingsPage> {
       SettingsCategory(
         icon: SettingsCategoryIcons.appearance,
         title: '外观',
-        subtitle: isMediaDesktop
-            ? '主题模式、OLED 纯黑'
-            : HapticPreferences.supported
-            ? '主题模式、振动反馈、播放页布局'
-            : '主题模式、OLED 纯黑、播放页布局',
+        subtitle: isMediaDesktop ? '主题模式、OLED 纯黑' : '主题模式、平板模式、播放页布局',
         // 用 builder 而不是固定 items：切到深色 / 切回浅色后，分类页重建
         // 时会重新判定，OLED 行不必退出重进就能出现或消失。
         // 播放页布局只在手机端有效（Windows/Linux 由桌面播放器承担）。
         itemsBuilder: (context) => [
           _themeModeItem(),
+          if (!isMediaDesktop) _tabletModeItem(),
           _dramaFeatureItem(),
           if (HapticPreferences.supported) _hapticsItem(),
           if (isDarkAppearance(
             systemBrightness: MediaQuery.platformBrightnessOf(context),
           ))
             _oledModeItem(),
-          if (!isMediaDesktop) _playerLayoutItem(),
+          if (!isMediaDesktop && DramaFeaturePreferences.visible)
+            _playerLayoutItem(),
         ],
       ),
       SettingsCategory(
@@ -192,7 +197,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ],
       ),
-      if (!isLinuxDesktop)
+      if (!isLinuxDesktop && DramaFeaturePreferences.visible)
         SettingsCategory(
           icon: SettingsCategoryIcons.drama,
           title: '短剧',
@@ -216,7 +221,7 @@ class _SettingsPageState extends State<SettingsPage> {
         icon: SettingsCategoryIcons.data,
         title: '数据',
         subtitle: '多端同步、备份与恢复、缓存与历史',
-        items: [
+        itemsBuilder: (context) => [
           SettingsItem(
             icon: Icons.sync,
             title: '多端同步',
@@ -244,15 +249,16 @@ class _SettingsPageState extends State<SettingsPage> {
               MaterialPageRoute(builder: (_) => const CachedBooksPage()),
             ),
           ),
-          SettingsItem(
-            icon: CupertinoIcons.play_rectangle,
-            title: '短剧离线缓存',
-            subtitle: isLinuxDesktop ? '管理已下载文件和下载任务' : '短剧下载、离线播放和清理缓存',
-            onTap: (context, _) => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const CachedDramasPage()),
+          if (DramaFeaturePreferences.visible)
+            SettingsItem(
+              icon: CupertinoIcons.play_rectangle,
+              title: '短剧离线缓存',
+              subtitle: isLinuxDesktop ? '管理已下载文件和下载任务' : '短剧下载、离线播放和清理缓存',
+              onTap: (context, _) => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const CachedDramasPage()),
+              ),
             ),
-          ),
           _clearHistItem(),
         ],
       ),
@@ -468,6 +474,32 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  SettingsItem _tabletModeItem() => SettingsItem(
+    icon: Icons.tablet_mac_outlined,
+    title: '平板模式',
+    rowBuilder: (context) => ValueListenableBuilder<bool>(
+      valueListenable: TabletPreferences.instance.enabled,
+      builder: (context, enabled, _) => SettingsToggleRow(
+        icon: Icons.tablet_mac_outlined,
+        title: '平板模式',
+        description: '宽屏使用侧边导航和宽屏布局，窄窗口自动恢复紧凑布局',
+        optimistic: false,
+        value: enabled,
+        onChanged: (value) async {
+          try {
+            await TabletPreferences.instance.setEnabled(value);
+          } catch (_) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('平板模式保存失败，请重试')));
+            }
+          }
+        },
+      ),
+    ),
+  );
+
   SettingsItem _dramaFeatureItem() => SettingsItem(
     icon: LucideIcons.clapperboard,
     title: '短剧功能',
@@ -476,7 +508,7 @@ class _SettingsPageState extends State<SettingsPage> {
       builder: (context, enabled, _) => SettingsToggleRow(
         icon: LucideIcons.clapperboard,
         title: '短剧功能',
-        description: '关闭后隐藏短剧入口并停用短剧播放',
+        description: '关闭后隐藏短剧和漫剧入口',
         optimistic: false,
         value: enabled,
         onChanged: (value) async {
@@ -604,7 +636,7 @@ class _SettingsPageState extends State<SettingsPage> {
     PlayerLayoutMode value,
   ) async {
     final previous = PlayerLayoutPreferences.mode.value;
-    if (previous == value) return;
+    if (previous == value && PlayerLayoutPreferences.hasSavedMode.value) return;
     PlayerLayoutPreferences.mode.value = value;
     try {
       if (!await PlayerLayoutPreferences.save(value)) {

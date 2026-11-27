@@ -1,3 +1,4 @@
+import '../widgets/tablet_layout.dart';
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -7,6 +8,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import '../models/rank.dart';
 import '../services/api_client.dart';
 import '../services/desktop_platform.dart';
+import '../services/drama_feature_preferences.dart';
 import '../services/rank_cache.dart';
 import '../services/user_facing_error.dart';
 import '../widgets/desktop_shell_scope.dart';
@@ -70,8 +72,9 @@ class _RankPageState extends State<RankPage> {
 
   RankCache get _cache => widget.rankCache ?? RankCache.instance;
 
-  RankTab? get _rank =>
-      _rankIndex < _catalog.tabs.length ? _catalog.tabs[_rankIndex] : null;
+  RankTab? get _rank => _rankIndex >= 0 && _rankIndex < _catalog.tabs.length
+      ? _catalog.tabs[_rankIndex]
+      : null;
 
   RankCategory? get _category => _categoryIndex < _catalog.categories.length
       ? _catalog.categories[_categoryIndex]
@@ -80,7 +83,27 @@ class _RankPageState extends State<RankPage> {
   @override
   void initState() {
     super.initState();
+    DramaFeaturePreferences.instance.enabled.addListener(_onDramaChanged);
     unawaited(_bootstrap());
+  }
+
+  @override
+  void dispose() {
+    DramaFeaturePreferences.instance.enabled.removeListener(_onDramaChanged);
+    super.dispose();
+  }
+
+  bool _showsRank(RankTab tab) =>
+      DramaFeaturePreferences.visible || !tab.isDrama;
+
+  void _onDramaChanged() {
+    final rank = _rank;
+    if ((rank != null && !_showsRank(rank)) ||
+        (_rankIndex < 0 && DramaFeaturePreferences.visible)) {
+      _selectRank(_catalog.tabs.indexWhere(_showsRank));
+    } else {
+      setState(() {});
+    }
   }
 
   Future<void> _bootstrap() async {
@@ -111,7 +134,13 @@ class _RankPageState extends State<RankPage> {
     } else {
       unawaited(_cache.saveCatalog(catalog));
     }
-    setState(() => _catalog = catalog);
+    setState(() {
+      _catalog = catalog;
+      final rank = _rank;
+      if (rank == null || !_showsRank(rank)) {
+        _rankIndex = catalog.tabs.indexWhere(_showsRank);
+      }
+    });
     await _loadFirst(generation);
   }
 
@@ -249,6 +278,10 @@ class _RankPageState extends State<RankPage> {
   @override
   Widget build(BuildContext context) {
     final palette = HomePalette.of(context);
+    final visibleRanks = [
+      for (final (index, tab) in _catalog.tabs.indexed)
+        if (_showsRank(tab)) index,
+    ];
     final inDesktopFrame =
         isWindowsDesktop && DesktopShellScope.hasFrameOf(context);
     return Scaffold(
@@ -272,16 +305,22 @@ class _RankPageState extends State<RankPage> {
       body: Align(
         alignment: Alignment.topCenter,
         child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: isWindowsDesktop ? 1240 : 840),
+          constraints: BoxConstraints(
+            maxWidth: isWindowsDesktop || TabletLayout.activeOf(context)
+                ? 1240
+                : 840,
+          ),
           child: Column(
             children: [
-              if (_catalog.tabs.isNotEmpty)
+              if (visibleRanks.isNotEmpty)
                 RankBoardTabs(
-                  tabs: _catalog.tabs,
-                  selectedIndex: _rankIndex,
-                  onSelect: _selectRank,
+                  tabs: [
+                    for (final index in visibleRanks) _catalog.tabs[index],
+                  ],
+                  selectedIndex: visibleRanks.indexOf(_rankIndex),
+                  onSelect: (index) => _selectRank(visibleRanks[index]),
                 ),
-              if (_catalog.categories.isNotEmpty && !(_rank?.isDrama ?? false))
+              if (_rank?.isDrama == false && _catalog.categories.isNotEmpty)
                 _categoryChips(palette),
               Expanded(child: _body()),
             ],
@@ -331,7 +370,12 @@ class _RankPageState extends State<RankPage> {
         onAction: () => unawaited(_bootstrap()),
       );
     }
-    if (_empty) {
+    final entries = DramaFeaturePreferences.visible
+        ? _page.entries
+        : _page.entries
+              .where((entry) => DramaFeaturePreferences.allowsKind(entry.kind))
+              .toList();
+    if (_empty || (entries.isEmpty && !_page.hasMore)) {
       return RankStateView(
         key: const Key('rank_empty'),
         icon: LucideIcons.trophy,
@@ -354,7 +398,8 @@ class _RankPageState extends State<RankPage> {
       },
       child: LayoutBuilder(
         builder: (context, constraints) {
-          if (isWindowsDesktop && constraints.maxWidth >= 880) {
+          if ((isWindowsDesktop || TabletLayout.activeOf(context)) &&
+              constraints.maxWidth >= 880) {
             final scaler = MediaQuery.textScalerOf(context);
             final rowExtent = math.max(
               108.0,
@@ -381,7 +426,7 @@ class _RankPageState extends State<RankPage> {
                       mainAxisExtent: rowExtent,
                     ),
                     delegate: SliverChildBuilderDelegate((context, index) {
-                      final entry = _page.entries[index];
+                      final entry = entries[index];
                       return DecoratedBox(
                         decoration: BoxDecoration(
                           color: palette.surface,
@@ -396,7 +441,7 @@ class _RankPageState extends State<RankPage> {
                           ),
                         ),
                       );
-                    }, childCount: _page.entries.length),
+                    }, childCount: entries.length),
                   ),
                 ),
                 if (hasFooter) SliverToBoxAdapter(child: _footer()),
@@ -412,14 +457,14 @@ class _RankPageState extends State<RankPage> {
               // 没有流尾时由列表自己吃掉底部安全区；有流尾时交给流尾。
               hasFooter ? 0 : 24 + MediaQuery.paddingOf(context).bottom,
             ),
-            itemCount: _page.entries.length + (hasFooter ? 1 : 0),
+            itemCount: entries.length + (hasFooter ? 1 : 0),
             itemBuilder: (context, index) {
-              if (index >= _page.entries.length) {
+              if (index >= entries.length) {
                 return _footer();
               }
               return _RankRow(
-                entry: _page.entries[index],
-                onTap: () => _openEntry(_page.entries[index]),
+                entry: entries[index],
+                onTap: () => _openEntry(entries[index]),
               );
             },
           );

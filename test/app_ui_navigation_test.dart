@@ -22,10 +22,13 @@ import 'package:fqapp/pages/text_replacement_page.dart';
 import 'package:fqapp/pages/theme_page.dart';
 import 'package:fqapp/services/app_theme_style.dart';
 import 'package:fqapp/services/desktop_platform.dart';
+import 'package:fqapp/services/drama_feature_preferences.dart';
 import 'package:fqapp/services/library_store.dart';
 import 'package:fqapp/services/shelf_group_store.dart';
 import 'package:fqapp/services/shelf_store.dart';
 import 'package:fqapp/services/shelf_view_store.dart';
+import 'package:fqapp/services/tablet_preferences.dart';
+import 'package:fqapp/widgets/tablet_layout.dart';
 import 'package:fqapp/widgets/app_ui/app_ui_scope.dart';
 import 'package:fqapp/widgets/classic_shell_dock.dart';
 import 'package:fqapp/widgets/desktop_app_frame.dart';
@@ -72,6 +75,91 @@ void main() {
     if (hiveDirectory.existsSync()) {
       await hiveDirectory.delete(recursive: true);
     }
+  });
+
+  testWidgets('短剧开关实时更新首页分类和底部导航', (tester) async {
+    final preferences = DramaFeaturePreferences.instance;
+    addTearDown(() => preferences.enabled.value = true);
+    await tester.pumpWidget(
+      _withFakeHome(
+        FqApp(initializer: _isolatedStartup, backendStarter: () async {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+    Finder homeTab(String label) =>
+        find.descendant(of: find.byType(HomePage), matching: find.text(label));
+    final dock = find.byType(ShellDock);
+    final dockDrama = find.descendant(of: dock, matching: find.text('短剧'));
+    expect(dockDrama, findsOneWidget);
+    expect(homeTab('短剧'), findsOneWidget);
+    expect(homeTab('漫剧'), findsOneWidget);
+    await tester.tap(homeTab('短剧'));
+    await tester.pumpAndSettle();
+
+    await preferences.setEnabled(false);
+    await tester.pumpAndSettle();
+    expect(dockDrama, findsNothing);
+    expect(homeTab('短剧'), findsNothing);
+    expect(homeTab('漫剧'), findsNothing);
+    expect(homeTab('漫画'), findsOneWidget);
+    expect(rootTab(tester), 0);
+    expect(
+      (await SharedPreferences.getInstance()).getBool('drama_feature_enabled'),
+      isFalse,
+    );
+    expect(tester.takeException(), isNull);
+
+    await preferences.setEnabled(true);
+    await tester.pumpAndSettle();
+    expect(dockDrama, findsOneWidget);
+    expect(homeTab('短剧'), findsOneWidget);
+    expect(homeTab('漫剧'), findsOneWidget);
+  });
+
+  testWidgets('tablet navigation follows the preference and window width', (
+    tester,
+  ) async {
+    final preferences = TabletPreferences.instance;
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1024, 768);
+    final store = AppThemeStyleStore();
+    addTearDown(store.dispose);
+    addTearDown(() {
+      preferences.enabled.value = false;
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      _withFakeHome(
+        FqApp(
+          initializer: _isolatedStartup,
+          backendStarter: () async {},
+          styleStore: store,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final shell = tester.state(find.byType(RootShell));
+    expect(find.byType(ShellDock), findsOneWidget);
+
+    await preferences.setEnabled(true);
+    await tester.pumpAndSettle();
+    expect(find.byType(ShellDock), findsNothing);
+    final rail = find.byType(TabletNavigation);
+    expect(rail, findsOneWidget);
+    await tester.tap(find.descendant(of: rail, matching: find.text('书架')));
+    await tester.pumpAndSettle();
+    expect(rootTab(tester), 2);
+    expect(tester.takeException(), isNull);
+
+    tester.view.physicalSize = const Size(500, 768);
+    await tester.pumpAndSettle();
+    expect(rail, findsNothing);
+    expect(find.byType(ShellDock), findsOneWidget);
+    expect(rootTab(tester), 2);
+    expect(identical(tester.state(find.byType(RootShell)), shell), isTrue);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('real shell, tabs and reader keep state across style switches', (

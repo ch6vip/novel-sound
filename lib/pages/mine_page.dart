@@ -1,3 +1,4 @@
+import '../widgets/tablet_layout.dart';
 import 'dart:async';
 
 import 'package:cupertino_ui/cupertino_ui.dart';
@@ -9,6 +10,7 @@ import '../models/reading_stats.dart';
 import '../services/app_style_tokens.dart';
 import '../services/book_open_preferences.dart';
 import '../services/desktop_platform.dart';
+import '../services/drama_feature_preferences.dart';
 import '../services/library_store.dart';
 import '../services/media_history_store.dart';
 import '../widgets/desktop_shell_scope.dart';
@@ -40,6 +42,14 @@ class _MinePageState extends State<MinePage> {
   Timer? _reloadTimer;
   bool _visible = false;
   bool _storeDirty = true;
+
+  @override
+  void initState() {
+    super.initState();
+    DramaFeaturePreferences.instance.enabled.addListener(_onDramaChanged);
+  }
+
+  void _onDramaChanged() => setState(() {});
 
   void _bindStore() {
     final store = LibraryStore.instance;
@@ -91,6 +101,7 @@ class _MinePageState extends State<MinePage> {
 
   @override
   void dispose() {
+    DramaFeaturePreferences.instance.enabled.removeListener(_onDramaChanged);
     _reloadTimer?.cancel();
     _historyChanges?.removeListener(_scheduleReload);
     _readTimeChanges?.removeListener(_scheduleReload);
@@ -124,7 +135,14 @@ class _MinePageState extends State<MinePage> {
     if (style.isClassic) {
       final palette = HomePalette.of(context);
       final today = DateUtils.dateOnly(DateTime.now());
-      if (isWindowsDesktop) {
+      final rank = _stats.rank
+          .where(
+            (item) => DramaFeaturePreferences.allowsKind(
+              item.entry['kind']?.toString(),
+            ),
+          )
+          .toList();
+      if (isWindowsDesktop || TabletLayout.activeOf(context)) {
         return Scaffold(
           backgroundColor: palette.canvas,
           appBar: inDesktopFrame
@@ -217,7 +235,7 @@ class _MinePageState extends State<MinePage> {
                                         today: today,
                                       ),
                                       ClassicMineTopBooks(
-                                        rank: _stats.rank,
+                                        rank: rank,
                                         onOpen: _openEntry,
                                       ),
                                     ],
@@ -255,10 +273,7 @@ class _MinePageState extends State<MinePage> {
                           desktopTopBar,
                           ClassicMineSummary(stats: _stats, today: today),
                           ClassicMineHeatmap(stats: _stats, today: today),
-                          ClassicMineTopBooks(
-                            rank: _stats.rank,
-                            onOpen: _openEntry,
-                          ),
+                          ClassicMineTopBooks(rank: rank, onOpen: _openEntry),
                           const ClassicMineEntries(),
                         ],
                       ),
@@ -303,7 +318,7 @@ class _MinePageState extends State<MinePage> {
                 if (phone) const ClassicMinePrimaryTools(),
                 ClassicMineHeatmap(stats: _stats, today: today),
                 ClassicMineTopBooks(
-                  rank: _stats.rank,
+                  rank: rank,
                   onOpen: _openEntry,
                   previewCount: phone
                       ? 3
@@ -316,7 +331,7 @@ class _MinePageState extends State<MinePage> {
         ),
       );
     }
-    if (isWindowsDesktop) {
+    if (isWindowsDesktop || TabletLayout.activeOf(context)) {
       final palette = HomePalette.of(context);
       final statsEntry = FeatureEntry(
         key: const ValueKey('mine-statistics'),
