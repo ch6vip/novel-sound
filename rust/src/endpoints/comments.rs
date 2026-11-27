@@ -843,24 +843,56 @@ fn handle_comment_replies<'a>(ctx: &'a Ctx, params: &'a Params) -> BoxFuture<'a,
             ));
         }
 
-        // 官方 7.0.9.32 抓包（`POST /novel/commentapi/reply/list/{comment_id}/v1`）：
-        // 书评回复 `comment_source=501`、段评回复 `503`，`comment_type` 固定 2、
-        // `group_type` 固定 1、`count=20`，`business_param` 只有 `book_id` 与
-        // `need_count`。`comment_source` 是评论命名空间：用错空间时上游照样回 200，
-        // 但 `reply_list` 为空、`total=0`，界面就会把「回复 48」显示成「回复 0」。
+        // 官方 7.0.9.32 抓包（`POST /novel/commentapi/reply/list/{comment_id}/v1`）
+        // 记的是书评回复：`comment_source=501`、`comment_type=2`、`group_type=1`、
+        // `count=20`，`business_param` 只有 `book_id` 与 `need_count`。
+        //
+        // 上游按 `(comment_source, comment_type, group_type[, server_channel])`
+        // 四元组切分评论数据空间，错任何一个都不会报错：照样 HTTP 200 + `code=0`，
+        // 只是 `reply_list` 为空、`comment_list_info.total=0`，界面就把「回复 3」
+        // 显示成空白。
+        //
+        // 2026-11-27 在真机 loopback 上对同一个 comment_id 逐组实测：
+        // - 段评回复 `(503, 1, 1, 38)` → 7 条；`(503, 2, 1, 38)` → 0 条；
+        // - 书评回复 `(501, 2, 1, 7)` → 7 条；`(501, 1, …)` → `code=103001
+        //   comment_type invalid`。
+        //
+        // 即段评回复要用 `comment_type=1`，而这里原先写死 2/1，段评请求永远落进
+        // 书评空间。三个值现在都由调用方透传，缺省仍是书评的 2/1（channel 由
+        // `reading724_large_screen_params()` 给 7），老调用方行为完全不变。
         let source = int_default(&params.get_str("comment_source"), 501);
-        let body = json!({
+        let comment_type = int_default(&params.get_str("comment_type"), 2);
+        let group_type = int_default(&params.get_str("group_type"), 1);
+        let mut body = json!({
             "business_param": {
                 "book_id": book_id,
                 "need_count": true,
             },
             "comment_id": comment_id,
             "comment_source": source,
-            "comment_type": 2,
+            "comment_type": comment_type,
             "count": int_default(&params.get_str("count"), 20).clamp(1, 50),
             "group_id": group_id,
-            "group_type": 1,
+            "group_type": group_type,
         });
+        // 段评列表要 `server_channel=38`，官方宿主用 43 会拿到 total=0；
+        // 回复接口同样认这个字段，调用方给了就透传。
+        if let Ok(channel) = params.get_str("server_channel").trim().parse::<i64>() {
+            body["server_channel"] = json!(channel);
+        }
+        // 段评回复可能还要段落上下文：官方段评会话里一定带 item_id 与
+        // item_version，书评则完全不带这些字段。调用方传了才写，避免污染书评请求。
+        let item_id = params.get_str("item_id");
+        if !item_id.is_empty() {
+            body["business_param"]["item_id"] = json!(item_id);
+        }
+        let item_version = params.get_str("item_version");
+        if !item_version.is_empty() {
+            body["business_param"]["item_version"] = json!(item_version);
+        }
+        if let Ok(para_index) = params.get_str("para_index").trim().parse::<i64>() {
+            body["business_param"]["para_index"] = json!(para_index);
+        }
         let body = serde_json::to_vec(&body).map_err(|e| ApiError::Internal(e.to_string()))?;
 
         Upstream::new(ctx.up.clone())

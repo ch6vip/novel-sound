@@ -54,4 +54,44 @@ void main() {
 
     expect(requests.single.queryParameters['comment_source'], '503');
   });
+
+  test('段评回复可显式指定 (comment_type, group_type, server_channel) 与段落上下文', () async {
+    final api = buildClient();
+    await api.commentReplies(
+      'book-1',
+      'comment-1',
+      groupId: 'item-1',
+      commentSource: 503,
+      commentType: 1,
+      groupType: 1,
+      serverChannel: 38,
+      itemId: 'item-1',
+      paraIndex: 7,
+      itemVersion: 'ver-1',
+    );
+
+    final query = requests.single.queryParameters;
+    expect(query['comment_source'], '503');
+    // 段评回复真正有数据的组合（503/1/1/38），错一个上游就回空列表。
+    expect(query['comment_type'], '1');
+    expect(query['group_type'], '1');
+    expect(query['server_channel'], '38');
+    // 段落上下文原样透传，书评调用方不传即保持旧请求体。
+    expect(query['item_id'], 'item-1');
+    expect(query['para_index'], '7');
+    expect(query['item_version'], 'ver-1');
+  });
+
+  test('不传新参数时请求体与旧版本保持一致', () async {
+    final api = buildClient();
+    await api.commentReplies('book-1', 'comment-1', groupId: 'book-1');
+
+    final query = requests.single.queryParameters;
+    expect(query.containsKey('comment_type'), isFalse);
+    expect(query.containsKey('group_type'), isFalse);
+    expect(query.containsKey('server_channel'), isFalse);
+    expect(query.containsKey('item_id'), isFalse);
+    expect(query.containsKey('para_index'), isFalse);
+    expect(query.containsKey('item_version'), isFalse);
+  });
 }
