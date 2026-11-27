@@ -35,6 +35,10 @@ class ReaderIdeasSheet extends StatefulWidget {
   /// backend exposes counts but no reaction writes (issue #95).
   final Future<CommentReplyPage> Function(String commentId)? replyLoader;
 
+  /// 官方段评面板不点开也能在父楼层下看到回复（截图对照 2026-11-26）。
+  /// 默认关闭：离线/测试调用方注入数据时不需要为此多发请求。
+  final bool autoPreviewReplies;
+
   const ReaderIdeasSheet({
     super.key,
     required this.ideas,
@@ -42,6 +46,7 @@ class ReaderIdeasSheet extends StatefulWidget {
     required this.preset,
     this.initialParaIndex,
     this.replyLoader,
+    this.autoPreviewReplies = false,
   });
 
   @override
@@ -306,6 +311,7 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
             textColor: _textColor,
             mutedColor: _mutedColor,
             replyLoader: widget.replyLoader,
+            autoPreviewReplies: widget.autoPreviewReplies,
           );
         },
       ),
@@ -355,12 +361,14 @@ class _CommentRow extends StatefulWidget {
   final Color textColor;
   final Color mutedColor;
   final Future<CommentReplyPage> Function(String commentId)? replyLoader;
+  final bool autoPreviewReplies;
 
   const _CommentRow({
     required this.comment,
     required this.textColor,
     required this.mutedColor,
     this.replyLoader,
+    this.autoPreviewReplies = false,
   });
 
   @override
@@ -372,40 +380,151 @@ class _CommentRowState extends State<_CommentRow> {
   bool _loading = false;
   bool _failed = false;
 
+  /// 上游明确回了「没有回复」（code=0 但 reply_list 为空）。这跟请求失败不是
+  /// 一回事：段评的 reply_count 常常大于 0，实际上游早把这批回复清掉了。
+  bool _empty = false;
+
+  /// 用户点过「展开」：回复全部展开，不再是预览态。
+  bool _expanded = false;
+
+  /// 自动预览只发一次，失败也不反复重试（手动点开仍可重试）。
+  bool _previewStarted = false;
+
+  /// 预览上限：官方在楼层下先露两条，余下走「查看全部」。
+  static const int _previewLimit = 2;
+
   BookComment get comment => widget.comment;
   Color get textColor => widget.textColor;
   Color get mutedColor => widget.mutedColor;
 
   /// Zero-reply comments get no collapsible footer (issue #173); the official
   /// list only appends one when replies remain.
-  bool get _hasReplies => (_replies?.totalCount ?? comment.replyCount) > 0;
+  ///
+  /// 预览到回复而上游计数为 0 时也算有回复，否则预览出来的回复会在重排后连同
+  /// 入口一起消失。
+  bool get _hasReplies => _replies != null || comment.replyCount > 0;
+
+  /// 预览里还有没露出来的回复。
+  bool get _hasHiddenReplies =>
+      widget.autoPreviewReplies &&
+      !_expanded &&
+      (_replies?.replies.length ?? 0) > _previewLimit;
+
+  @override
+  void initState() {
+    super.initState();
+    _schedulePreview();
+  }
+
+  @override
+  void didUpdateWidget(_CommentRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // ListView.builder 没有 key 时按位置复用 State：换了一条评论就得清干净，
+    // 否则上一条的回复会挂到这一条下面。
+    if (oldWidget.comment.id != widget.comment.id) {
+      _replies = null;
+      _failed = false;
+      _empty = false;
+      _loading = false;
+      _expanded = false;
+      _previewStarted = false;
+      _schedulePreview();
+    }
+  }
+
+  /// 首帧之后再拉预览，避免 build 期间发请求。
+  void _schedulePreview() {
+    if (!widget.autoPreviewReplies || widget.replyLoader == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _previewStarted) return;
+      _previewStarted = true;
+      unawaited(_loadReplies(manual: false));
+    });
+  }
+
+  /// 预览态只渲染前 [_previewLimit] 条。
+  CommentReplyPage _previewPage(CommentReplyPage page) {
+    if (!widget.autoPreviewReplies ||
+        _expanded ||
+        page.replies.length <= _previewLimit) {
+      return page;
+    }
+    return CommentReplyPage(
+      replies: List.unmodifiable(page.replies.take(_previewLimit)),
+      totalCount: page.totalCount,
+      hasMore: page.hasMore,
+      cursor: page.cursor,
+    );
+  }
 
   Future<void> _toggleReplies() async {
     if (_loading) return;
-    // A second tap collapses; the page is kept so reopening is instant.
+    // 有回复时：先把折叠的预览全展开，已全展开则收起；还没有回复才去拉。
     if (_replies != null) {
-      setState(() => _replies = null);
+      setState(() {
+        if (_hasHiddenReplies) {
+          _expanded = true;
+        } else {
+          _replies = null;
+          _expanded = false;
+        }
+      });
       return;
     }
+    await _loadReplies(manual: true);
+  }
+
+  Future<void> _loadReplies({required bool manual}) async {
+    if (_loading) return;
     final loader = widget.replyLoader;
     if (loader == null) return;
+    var leased = false;
+    if (!manual) {
+      await _ReplyPreviewGate.acquire();
+      leased = true;
+    }
+    if (!mounted) {
+      if (leased) _ReplyPreviewGate.release();
+      return;
+    }
     setState(() {
       _loading = true;
       _failed = false;
+      _empty = false;
     });
     try {
       final page = await loader(comment.id);
       if (!mounted) return;
       setState(() {
-        _replies = page;
+        // 上游在错误的 comment_source 命名空间里会照常回 200，但 reply_list 为空、
+        // total 为 0（参见 #491）。这种「声称有回复却一条都拿不到」的响应不能渲染成
+        // 空白或「暂无回复」，否则看起来就是评论区展开后什么都没显示；保留原计数
+        // 并按失败处理，给出可重试的入口——与书评详情面板同一套语义（#492）。
+        if (page.isEmpty) {
+          // 已经拿到过回复时不要被一次空响应清空：上游偶发返回空列表，
+          // 重试或翻页后不该让用户已经看到的内容凭空消失，所以这里不动 _replies。
+          //
+          // 空列表 = 上游明确说这条段评没有回复（code=0、reply_list 空）。段评的
+          // reply_count 与上游真实回复数经常不一致，把它当失败只会让入口变成
+          // 「回复加载失败，点击重试」死循环；真正的失败只来自下面的 catch。
+          // 自动预览拿到空也不打扰阅读，不一直挂着「加载中」。
+          _empty = true;
+          _failed = false;
+        } else {
+          _replies = page;
+          _failed = false;
+          _expanded = _expanded || manual;
+        }
         _loading = false;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
-        _failed = true;
+        _failed = manual;
         _loading = false;
       });
+    } finally {
+      if (leased) _ReplyPreviewGate.release();
     }
   }
 
@@ -424,35 +543,55 @@ class _CommentRowState extends State<_CommentRow> {
   /// caller must not get a control that can only fail.
   Widget _replyCounter(TextStyle metaStyle) {
     final canOpen = widget.replyLoader != null;
-    final open = _replies != null;
-    final label = _replies?.totalCount ?? comment.replyCount;
+    final loaded = _replies;
+    final open = loaded != null;
+    // 预览到的条数优先：上游的 reply_count 经常是 0，而回复其实拿得到。
+    final loadedTotal = loaded == null
+        ? 0
+        : (loaded.totalCount > 0 ? loaded.totalCount : loaded.replies.length);
+    final label = comment.replyCount > 0 ? comment.replyCount : loadedTotal;
+    final labelText = formatCount(label);
+    final totalText = formatCount(loadedTotal);
     // 不可展开时保留原来的只读计数，不冒充「展开 N 条回复」。
     if (!canOpen) {
-      return Text(
-        label > 0 ? '回复 ${formatCount(label)}' : '回复',
-        style: metaStyle,
-      );
+      return Text(label > 0 ? '回复 $labelText' : '回复', style: metaStyle);
     }
-    final text = _loading
-        ? '加载中'
-        : open
-        ? '收起'
-        : '展开 ${formatCount(label)} 条回复';
+    final String text;
+    if (_loading && !open) {
+      text = '加载中';
+    } else if (!open && _empty) {
+      // 上游确实没有回复：直说，而不是让用户反复点「展开 N 条回复」。
+      text = '暂无回复';
+    } else if (!open) {
+      text = '展开 $labelText 条回复';
+    } else if (_hasHiddenReplies) {
+      text = '查看全部 $totalText 条回复';
+    } else {
+      text = '收起';
+    }
+    // 「暂无回复」是终态：不挂点击、不画箭头，避免用户反复点一个只会再空一次的入口。
+    final inert = !open && _empty;
     return GestureDetector(
       key: ValueKey('reader_reply_toggle_${comment.id}'),
       behavior: HitTestBehavior.opaque,
-      onTap: () => unawaited(_toggleReplies()),
+      onTap: inert ? null : () => unawaited(_toggleReplies()),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(text, style: metaStyle),
-          const SizedBox(width: 2),
-          // 官方是把同一个箭头旋转 0°/180°，这里用上下箭头等价表达。
-          AnimatedRotation(
-            turns: open ? 0.5 : 0,
-            duration: const Duration(milliseconds: 160),
-            child: Icon(LucideIcons.chevron_down, size: 13, color: mutedColor),
-          ),
+          if (!inert) ...[
+            const SizedBox(width: 2),
+            // 官方是把同一个箭头旋转 0°/180°，这里用上下箭头等价表达。
+            AnimatedRotation(
+              turns: open ? 0.5 : 0,
+              duration: const Duration(milliseconds: 160),
+              child: Icon(
+                LucideIcons.chevron_down,
+                size: 13,
+                color: mutedColor,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -520,17 +659,29 @@ class _CommentRowState extends State<_CommentRow> {
                 if (_replies case final CommentReplyPage loaded) ...[
                   const SizedBox(height: 8),
                   _ReplyList(
-                    page: loaded,
+                    page: _previewPage(loaded),
                     textColor: textColor,
                     mutedColor: mutedColor,
                   ),
                 ],
                 if (_failed) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    '回复加载失败',
+                  const SizedBox(height: 2),
+                  // 失败文案本身就是重试入口：官方在这里是静默的，但用户
+                  // 点开过就应该能再试一次，而不是被一句「失败」卡住。
+                  TextButton(
                     key: ValueKey('reader_reply_error_${comment.id}'),
-                    style: TextStyle(color: mutedColor, fontSize: 12.5),
+                    onPressed: _loading
+                        ? null
+                        : () => _loadReplies(manual: true),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 2),
+                      minimumSize: const Size(0, 28),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: Text(
+                      '回复加载失败，点击重试',
+                      style: TextStyle(color: mutedColor, fontSize: 12.5),
+                    ),
                   ),
                 ],
                 const SizedBox(height: 10),
@@ -737,4 +888,30 @@ class _IdeaAvatar extends StatelessWidget {
             ),
     ),
   );
+}
+
+/// 段评预览的并发闸门：一屏能挂二十条评论，全部同时摘要会打爆上游。
+/// 只在自动预览（用户没点开）时占用，手动点开不加限。
+class _ReplyPreviewGate {
+  static const int _maxConcurrent = 3;
+  static int _active = 0;
+  static final List<Completer<void>> _waiting = <Completer<void>>[];
+
+  static Future<void> acquire() {
+    if (_active < _maxConcurrent) {
+      _active += 1;
+      return Future<void>.value();
+    }
+    final completer = Completer<void>();
+    _waiting.add(completer);
+    return completer.future;
+  }
+
+  static void release() {
+    if (_waiting.isEmpty) {
+      _active -= 1;
+      return;
+    }
+    _waiting.removeAt(0).complete();
+  }
 }
