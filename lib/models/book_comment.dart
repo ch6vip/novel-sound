@@ -249,13 +249,31 @@ BookComment? _paragraphComment(dynamic comment, dynamic stat) {
     text: text,
     imageUrls: imageUrls,
     diggCount: _int(statMap['digg_count']),
-    replyCount: _int(statMap['reply_count']),
+    replyCount: _replyCountOf(statMap, comment, commonMap),
     readSeconds: _int(statMap['read_duration']),
     createdAt: _timestamp(commonMap['create_timestamp']),
     userName: _string(baseMap['user_name']),
     userAvatar: _string(baseMap['user_avatar']),
     isAuthor: tagMap['is_author'] == true,
   );
+}
+
+/// 回复数在几个地方出现过：段评放在 `comment.stat.reply_count`，书评列表放在
+/// 扁平字段，短剧用 `sub_comment_count`。取第一个非零值——同一个键优先，
+/// 避免上游把回复数搬到别的层级后整块评论都不显示回复入口。
+int _replyCountOf(Map statMap, Map commentMap, Map commonMap) {
+  final candidates = <dynamic>[
+    statMap['reply_count'],
+    commentMap['reply_count'],
+    commonMap['reply_count'],
+    commentMap['reply_cnt'],
+    statMap['sub_comment_count'],
+  ];
+  for (final value in candidates) {
+    final parsed = _int(value);
+    if (parsed > 0) return parsed;
+  }
+  return 0;
 }
 
 /// The upstream cursor is a JSON string such as `{"offset":20}`; keep the

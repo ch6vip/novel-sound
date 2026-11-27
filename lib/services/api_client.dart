@@ -1157,15 +1157,29 @@ class ApiClient {
 
   /// Replies to one review. All three ids are required by the backend.
   ///
-  /// [commentSource] 是上游的评论命名空间：书评 `501`、段评 `503`（官方 7.0.9.32
-  /// 抓包）。传错空间不会报错，只会拿到空的 `reply_list` 和 `total=0`，看起来就像
-  /// 这条评论没有回复。
+  /// 上游按 `(comment_source, comment_type, group_type[, server_channel])` 四元组
+  /// 切分评论数据空间，四个值错一个都不会报错：照样回 HTTP 200 + `code=0`，只是
+  /// `reply_list` 为空、`comment_list_info.total=0`，界面上就是「有 N 条回复但点开
+  /// 空白」。各链路的实际取值（2026-11-27 在真机 loopback 上逐组实测）：
+  ///
+  /// - 书评列表 `(1, 2, 1, 7)`、段评列表 `(2, 1, 15, 38)`
+  /// - 书评回复 `(501, 2, 1, 7)`、段评回复 `(503, 1, 1, 38)`
+  ///
+  /// 决定性的字段是 [commentType]：同一个段评 comment_id 用 `503 + type 2` 探针
+  /// 返回 0 条，换 `503 + type 1` 才拿到全部回复。因此这里把后三个值做成可选透传，
+  /// 不传时请求体与既往版本完全一致（书评调用方无需改动）。
   Future<CommentReplyPage> commentReplies(
     String bookId,
     String commentId, {
     required String groupId,
     int commentSource = 501,
     int count = 20,
+    int? commentType,
+    int? groupType,
+    int? serverChannel,
+    String? itemId,
+    int? paraIndex,
+    String? itemVersion,
   }) async {
     final response = await _get(
       _url('/api/v1/comments/${Uri.encodeComponent(commentId)}/replies', {
@@ -1174,6 +1188,17 @@ class ApiClient {
         'book_id': bookId,
         'comment_source': '$commentSource',
         'count': '$count',
+        // 上游按 (comment_source, comment_type, group_type[, server_channel])
+        // 四元组切数据空间，书评是 (501, 2, 1)，段评是 (2, 1, 15, 38)。
+        if (commentType != null) 'comment_type': '$commentType',
+        if (groupType != null) 'group_type': '$groupType',
+        if (serverChannel != null) 'server_channel': '$serverChannel',
+        // 段评回复可能还需要段落上下文（官方段评会话必带 item_id/item_version），
+        // 书评调用方不传，请求体就与旧行为完全一致。
+        if (itemId != null && itemId.isNotEmpty) 'item_id': itemId,
+        if (paraIndex != null) 'para_index': '$paraIndex',
+        if (itemVersion != null && itemVersion.isNotEmpty)
+          'item_version': itemVersion,
       }),
       method: 'POST',
     );

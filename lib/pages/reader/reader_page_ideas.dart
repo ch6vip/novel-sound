@@ -1,5 +1,10 @@
 part of '../reader_page.dart';
 
+/// 上一次成功拿到回复的命名空间组合下标（见 [_ReaderPageIdeas] 的回复加载器）。
+/// 段评与书评的回复落在不同的 (source, type, group[, channel]) 空间里，同一本书
+/// 里也可能混着两种；记住成功的那个组合，后续命中一次请求就够了。
+int? _replyCombo;
+
 /// Paragraph ideas (段评) loading and the ideas sheet.
 extension _ReaderPageIdeas on _ReaderPageState {
   /// Loads the chapter's paragraph ideas. Decoration only: a failure leaves the
@@ -125,7 +130,9 @@ extension _ReaderPageIdeas on _ReaderPageState {
             },
             // 回复按需展开（issue #95）。与段评正文同一套「注入即离线」
             // 约定：调用方自己提供数据时不接网络，也就不给可点的回复入口。
-            replyLoader: _ideasReplyLoader(),
+            replyLoader: _ideasReplyLoader(chapter),
+            // 官方段评面板不用点开就能看到楼层下的回复；这里开启自动预览。
+            autoPreviewReplies: true,
           ),
         ),
       );
@@ -162,11 +169,12 @@ extension _ReaderPageIdeas on _ReaderPageState {
     ParagraphIdeas paragraph,
     String ideaVersion,
     String? cursor,
-  ) {
+  ) async {
+    final version = chapter.version.isNotEmpty ? chapter.version : ideaVersion;
     return ApiClient.instance.paragraphComments(
       widget.bookId,
       chapter.itemId,
-      itemVersion: chapter.version.isNotEmpty ? chapter.version : ideaVersion,
+      itemVersion: version,
       paraIndex: paragraph.paraIndex,
       cursor: cursor,
     );
@@ -177,20 +185,75 @@ extension _ReaderPageIdeas on _ReaderPageState {
   /// Null when the caller injected its own comment data or when a chapter
   /// cache was injected (both mark an offline caller), which keeps the reply
   /// counter a plain read-only number for them.
-  Future<CommentReplyPage> Function(String commentId)? _ideasReplyLoader() {
+  Future<CommentReplyPage> Function(String commentId)? _ideasReplyLoader(
+    Chapter chapter,
+  ) {
     if (widget.commentResolver != null ||
         widget.ideasLoader != null ||
         widget.chapterCache != null) {
       return null;
     }
     if (widget.bookId.isEmpty) return null;
-    return (commentId) => ApiClient.instance.commentReplies(
-      widget.bookId,
-      commentId,
-      groupId: widget.bookId,
-      // 段评在 503 命名空间，书评是 501；用错会拿到空列表。
-      commentSource: 503,
-    );
+    final book = widget.bookId;
+    final itemId = chapter.itemId;
+    return (commentId) async {
+      // 上游按 (comment_source, comment_type, group_type[, server_channel])
+      // 四元组切分评论数据空间：段评列表 (2, 1, 15, 38)、书评列表 (1, 2, 1, 7)，
+      // 回复接口沿用同一套标识。传错不报错，只回 200 + 空 reply_list，界面上就是
+      // 「展开 3 条回复」点开一片空白。
+      //
+      // 2026-11-27 在设备上逐组实测：段评回复是 (503, 1, 1, 38)、书评回复是
+      // (501, 2, 1, 7)，决定性字段是 comment_type —— 同一 comment_id 用
+      // 503 + type 2 只拿到空列表，换成 503 + type 1 才有数据。第一组是段评命名
+      // 空间，第二组兜底（个别书的段评回复确实落在 501 空间）。拿到非空结果立刻
+      // 返回并记住组合，同一本书下次只发一个请求；全为空时返回条数最多的一页，
+      // 由上层区分「暂无回复」与「加载失败」。
+      final version = chapter.version;
+      final attempts = <Future<CommentReplyPage> Function()>[
+        () => ApiClient.instance.commentReplies(
+          book,
+          commentId,
+          groupId: itemId,
+          commentSource: 503,
+          commentType: 1,
+          groupType: 1,
+          serverChannel: 38,
+          itemId: itemId,
+          itemVersion: version,
+        ),
+        () => ApiClient.instance.commentReplies(
+          book,
+          commentId,
+          groupId: book,
+          commentSource: 501,
+          commentType: 2,
+          groupType: 1,
+        ),
+      ];
+      CommentReplyPage? best;
+      // 先试上次成功的组合，再按顺序补齐其余组合。
+      final preferred = _replyCombo;
+      final order = <int>[
+        if (preferred != null && preferred < attempts.length) preferred,
+        for (var i = 0; i < attempts.length; i++)
+          if (i != preferred) i,
+      ];
+      for (final i in order) {
+        try {
+          final page = await attempts[i]();
+          if (page.replies.isNotEmpty) {
+            _replyCombo = i;
+            return page;
+          }
+          if (best == null || page.replies.length > best.replies.length) {
+            best = page;
+          }
+        } on Exception {
+          continue;
+        }
+      }
+      return best ?? CommentReplyPage.empty;
+    };
   }
 }
 
