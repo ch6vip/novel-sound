@@ -19,6 +19,12 @@ class FanqieImportPreview {
   final Set<String> shelfIds;
   final bool hasShelfSource;
   final bool shelfSourceFailed;
+  final bool shelfSourceIncomplete;
+  final List<String> shelfCoverageReasons;
+  final int shelfRecordsMissingType;
+  final int shelfInfoInferredNovelCount;
+  final int deletedShelfRecords;
+  final int unrecognizedShelfRecords;
 
   const FanqieImportPreview(
     this.records,
@@ -28,7 +34,22 @@ class FanqieImportPreview {
     this.shelfIds = const {},
     this.hasShelfSource = false,
     this.shelfSourceFailed = false,
+    this.shelfSourceIncomplete = false,
+    this.shelfCoverageReasons = const [],
+    this.shelfRecordsMissingType = 0,
+    this.shelfInfoInferredNovelCount = 0,
+    this.deletedShelfRecords = 0,
+    this.unrecognizedShelfRecords = 0,
   });
+
+  /// 书架来源有一次没走完，或者条目被我们判不出类型。只要成立，本次导入就
+  /// 只能算部分导入，不能用完整成功的措辞。
+  bool get shelfPartial =>
+      hasShelfSource &&
+      (shelfSourceFailed ||
+          shelfSourceIncomplete ||
+          shelfRecordsMissingType > 0 ||
+          unrecognizedShelfRecords > 0);
 
   List<Map<String, dynamic>> get shelfRecords => [
     for (final record in records)
@@ -94,6 +115,8 @@ class FanqieLibraryImportService {
     }
     final records = parser.records;
     if (records.length > 10000) throw const FormatException('小说超过 10000 本，未导入');
+    final captureShelfIncomplete =
+        capture.shelfCoverageComplete == false && !parser.shelfInfoComplete;
     var matched = 0;
     var unresolved = 0;
     var done = 0;
@@ -148,6 +171,13 @@ class FanqieLibraryImportService {
       shelfIds: parser.shelfIds,
       hasShelfSource: parser.hasShelfSource,
       shelfSourceFailed: parser.shelfSourceFailed,
+      shelfSourceIncomplete:
+          parser.shelfSourceIncomplete || captureShelfIncomplete,
+      shelfCoverageReasons: capture.shelfCoverageReasons,
+      shelfRecordsMissingType: parser.shelfRecordsMissingType,
+      shelfInfoInferredNovelCount: parser.shelfInfoInferredNovelCount,
+      deletedShelfRecords: parser.deletedShelfRecords,
+      unrecognizedShelfRecords: parser.unrecognizedShelfRecords,
     );
   }
 

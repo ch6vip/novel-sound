@@ -276,16 +276,43 @@ class _FanqieHistoryImportPageState extends State<FanqieHistoryImportPage> {
       return '历史文件仅包含阅读记录，将全部 ${parsed.records.length} 本导入浏览历史，'
           '不加入书架；保留较新的本机阅读位置。';
     }
-    if (parsed.shelfCount == 0 && parsed.shelfSourceFailed) {
-      return '书架接口未能采集成功，本次仅将 ${parsed.records.length} 本导入浏览历史，'
-          '不写入书架；保留较新的本机阅读位置。';
+    final total = parsed.records.length;
+    if (!parsed.hasShelfSource) {
+      // 采到一半中断、或者三个书架接口都失败时，以前这里会说「书架中暂无小说」，
+      // 把「没拿到」说成「没有」。两者必须分开。
+      final reason = parsed.shelfSourceFailed ? '书架接口未能采集成功' : '本次采集没有拿到书架数据';
+      return '$reason：$total 本全部导入浏览历史，不写入书架；'
+          '如果账号里确有书架小说，请在「采集详情」里确认书架来源状态后重新采集。';
     }
     if (parsed.shelfCount == 0) {
-      return '番茄账号书架中暂无小说，本次仅将 ${parsed.records.length} 本导入浏览历史；'
-          '保留较新的本机阅读位置。';
+      return parsed.shelfPartial
+          ? '部分导入：书架数据不完整，没有可确认的书架小说，$total 本导入浏览历史，不写入书架；'
+                '保留较新的本机阅读位置。'
+          : '番茄账号书架中暂无小说，本次仅将 $total 本导入浏览历史；保留较新的本机阅读位置。';
+    }
+    if (parsed.shelfPartial) {
+      return '部分导入：书架来源有失败或未走完，仅将已取得的 ${parsed.shelfCount} 本加入本机书架，'
+          '全部 $total 本加入浏览历史；保留较新的本机阅读位置。';
     }
     return '仅将番茄书架中的 ${parsed.shelfCount} 本加入本机书架，'
-        '全部 ${parsed.records.length} 本加入浏览历史，保留较新的本机阅读位置。';
+        '全部 $total 本加入浏览历史，保留较新的本机阅读位置。';
+  }
+
+  String _shelfDiagnostics(FanqieImportPreview parsed) {
+    final notes = <String>{
+      if (parsed.shelfSourceFailed) '书架来源有失败',
+      if (parsed.shelfSourceIncomplete) '书架来源未走完分页',
+      ...parsed.shelfCoverageReasons,
+      if (parsed.shelfRecordsMissingType > 0)
+        '${parsed.shelfRecordsMissingType} 条书目缺少类型字段，未计入书架',
+      if (parsed.shelfInfoInferredNovelCount > 0)
+        '${parsed.shelfInfoInferredNovelCount} 条书架记录省略类型字段，已按小说导入',
+      if (parsed.unrecognizedShelfRecords > 0)
+        '${parsed.unrecognizedShelfRecords} 条书目字段名无法识别，未导入',
+      if (parsed.deletedShelfRecords > 0)
+        '${parsed.deletedShelfRecords} 条带删除标记',
+    }.toList(growable: false);
+    return '诊断：${notes.join('；')}。';
   }
 
   String _mergeButtonLabel(FanqieImportPreview parsed) => parsed.shelfCount > 0
@@ -473,6 +500,10 @@ class _FanqieHistoryImportPageState extends State<FanqieHistoryImportPage> {
                     _previewSummary(parsed),
                     style: muted.copyWith(fontSize: 13),
                   ),
+                  if (parsed.shelfPartial) ...[
+                    const SizedBox(height: 6),
+                    Text(_shelfDiagnostics(parsed), style: subtle),
+                  ],
                   const SizedBox(height: 8),
                   Text('未取得章节的作品从头开始；已定位的作品从对应章节开头续读。', style: subtle),
                   if (!classic) const SizedBox(height: 16),

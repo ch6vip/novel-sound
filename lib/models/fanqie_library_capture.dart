@@ -14,6 +14,20 @@ class FanqieLibraryCapture {
   int get received => sources.where((s) => s['status'] == 'received').length;
   int get failed => sources.where((s) => s['status'] == 'failed').length;
   String get stopReason => document['stopReason'] as String? ?? '';
+  Map<String, dynamic>? get shelfCoverage {
+    final value = document['shelfCoverage'];
+    return value is Map<String, dynamic> ? value : null;
+  }
+
+  bool? get shelfCoverageComplete {
+    final value = shelfCoverage?['complete'];
+    return value is bool ? value : null;
+  }
+
+  List<String> get shelfCoverageReasons =>
+      (shelfCoverage?['reasons'] as List? ?? const [])
+          .whereType<String>()
+          .toList(growable: false);
   List<String> get parts =>
       (document['parts'] as List? ?? const []).cast<String>();
 
