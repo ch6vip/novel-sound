@@ -83,7 +83,11 @@ class ParagraphIdeas {
 
 /// Every paragraph idea bucket for one chapter.
 class ChapterIdeas {
-  const ChapterIdeas({this.itemVersion = '', this.paragraphs = const []});
+  const ChapterIdeas({
+    this.itemVersion = '',
+    this.paragraphs = const [],
+    this.chapterEndIndex,
+  });
 
   static const empty = ChapterIdeas();
 
@@ -91,6 +95,23 @@ class ChapterIdeas {
   final String itemVersion;
 
   final List<ParagraphIdeas> paragraphs;
+
+  /// An explicit chapter-wide bucket, when the source supplies one.
+  final int? chapterEndIndex;
+
+  int? get endIndex =>
+      chapterEndIndex ??
+      (paragraphs.isEmpty ? null : paragraphs.last.paraIndex);
+
+  int get endCount => switch (chapterEndIndex) {
+    final int index => forParagraph(index)?.count ?? 0,
+    null => total,
+  };
+
+  bool get hasChapterComments => endCount > 0 && endIndex != null;
+
+  bool get hasInlineIdeas =>
+      paragraphs.any((p) => p.showsBubble && p.paraIndex != chapterEndIndex);
 
   bool get isEmpty => paragraphs.isEmpty;
   bool get isNotEmpty => paragraphs.isNotEmpty;
@@ -107,13 +128,14 @@ class ChapterIdeas {
   /// value is the paragraph's total count (not the gated channel's).
   Map<int, int> get bubbleCounts => {
     for (final p in paragraphs)
-      if (p.showsBubble) p.paraIndex: p.count,
+      if (p.showsBubble && p.paraIndex != chapterEndIndex) p.paraIndex: p.count,
   };
 
   /// Which official mask each bubble uses, keyed like [bubbleCounts].
   Map<int, ParagraphBubbleVariant> get bubbleVariants => {
     for (final p in paragraphs)
-      if (p.showsBubble) p.paraIndex: p.bubbleVariant,
+      if (p.showsBubble && p.paraIndex != chapterEndIndex)
+        p.paraIndex: p.bubbleVariant,
   };
 
   /// Total idea count across the chapter.

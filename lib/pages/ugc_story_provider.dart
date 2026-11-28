@@ -40,6 +40,10 @@ class UgcStoryState {
 }
 
 class UgcStoriesNotifier extends Notifier<UgcStoryState> {
+  UgcStoriesNotifier({ApiClient? api}) : _api = api ?? ApiClient.instance;
+
+  final ApiClient _api;
+
   int _generation = 0;
   int _nextOffset = 0;
   String? _sessionId;
@@ -106,10 +110,9 @@ class UgcStoriesNotifier extends Notifier<UgcStoryState> {
     _lastFailureWasFirstPage = false;
     state = state.copyWith(isLoadMore: true, clearError: true);
     try {
-      final page = await ApiClient.instance.withCancellation(
+      final page = await _api.withCancellation(
         request,
-        () =>
-            ApiClient.instance.ugcStories(offset: offset, sessionId: sessionId),
+        () => _api.ugcStories(offset: offset, sessionId: sessionId),
       );
       if (!_isActive(generation)) return;
       final nextOffset = page.nextOffset;
@@ -162,10 +165,7 @@ class UgcStoriesNotifier extends Notifier<UgcStoryState> {
       clearError: true,
     );
     try {
-      final page = await ApiClient.instance.withCancellation(
-        request,
-        ApiClient.instance.ugcStories,
-      );
+      final page = await _api.withCancellation(request, _api.ugcStories);
       if (!_isActive(generation)) return;
       if (page.hasMore && (page.nextOffset == null || page.nextOffset! <= 0)) {
         throw const FormatException('短篇首屏分页游标未前进，请稍后重试');

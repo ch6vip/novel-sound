@@ -251,7 +251,7 @@ extension _ReaderPageSelectionOverlay on _ReaderPageState {
   /// directly to the next text page; their comments are in the reader toolbar.
   Widget _buildChapterEndPage(ReaderThemePreset preset) {
     final endBucket = _chapterEndParagraph();
-    final commentCount = _ideas.total;
+    final commentCount = _ideas.endCount;
     return ColoredBox(
       color: _effectiveBackgroundColor,
       child: Center(
@@ -276,10 +276,7 @@ extension _ReaderPageSelectionOverlay on _ReaderPageState {
     );
   }
 
-  /// The chapter-end aggregate bucket: the ideas response's greatest paragraph
-  /// key (e.g. para 10000), which the official client opens for 章末章评.
-  int? _chapterEndParagraph() =>
-      _ideas.paragraphs.isEmpty ? null : _ideas.paragraphs.last.paraIndex;
+  int? _chapterEndParagraph() => _ideas.endIndex;
 
   void _hideControlsOnDrag() {
     _stopAutoTurn();

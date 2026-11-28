@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 
 import '../models/media_item.dart';
+import '../models/novel_plugin_book_id.dart';
 import '../models/shuqi_book.dart';
+import '../services/api_client.dart';
 import '../services/book_updates.dart';
 import '../services/chapter_cache_store.dart';
 import '../services/connectivity_status.dart';
@@ -26,6 +28,7 @@ Future<bool> openRecentBook(
   ChapterCache? cache,
   ReaderStore? readerStore,
   BookDirectoryLoader? directoryLoader,
+  ApiClient? novelApi,
 }) async {
   final kind = item.kind;
   // Shelf/history items carry the upstream ID and source. Only the local
@@ -102,9 +105,18 @@ Future<bool> openRecentBook(
               cache: cache,
               readerStore: baseStore,
               item: item,
+              novelApi: novelApi,
               // 注入缓存的调用方自带数据，仅显式提供 loader 时联网。
               directoryLoader:
                   directoryLoader ??
+                  (novelApi == null
+                      ? null
+                      : (bookId) async {
+                          final volumes = await novelApi.directoryChapters(
+                            bookId,
+                          );
+                          return volumes.expand((volume) => volume).toList();
+                        }) ??
                   (cache == null
                       ? isShuqi
                             ? (_) => loadShuqiDirectory(item.id)
@@ -123,6 +135,7 @@ class _RecentBookReader extends StatefulWidget {
   final ChapterCache? cache;
   final ReaderStore readerStore;
   final MediaItem item;
+  final ApiClient? novelApi;
   final BookDirectoryLoader? directoryLoader;
 
   const _RecentBookReader({
@@ -131,6 +144,7 @@ class _RecentBookReader extends StatefulWidget {
     required this.cache,
     required this.readerStore,
     required this.item,
+    this.novelApi,
     required this.directoryLoader,
   });
 
@@ -179,6 +193,7 @@ class _RecentBookReaderState extends State<_RecentBookReader>
 
   @override
   Widget build(BuildContext context) => ReaderPage(
+    novelApi: widget.novelApi,
     bookId: widget.book.id,
     title: widget.book.title,
     cover: widget.book.cover,
@@ -214,23 +229,27 @@ Future<bool> openCachedBook(
   MediaItem? shelfItem,
 }) async {
   final store = cache ?? ChapterCacheStore.instance;
+  final pluginBook = parseNovelPluginBookId(book.id);
   final shuqiId = shuqiBookIdFromReaderId(book.id);
   if (book.id.startsWith('shuqi:') && shuqiId == null) {
     throw StateError('书旗缓存标识无效，请删除后重新缓存');
   }
   final historyStore = readerStore ?? LibraryStore.instance;
-  final sourceItem = shuqiId == null
+  final sourceId =
+      pluginBook?.source ?? (shuqiId == null ? null : shuqiSourceId);
+  final sourceBookId = pluginBook?.bookId ?? shuqiId;
+  final sourceItem = sourceId == null
       ? shelfItem
-      : shelfItem?.copyWith(id: shuqiId, source: shuqiSourceId) ??
+      : shelfItem?.copyWith(id: sourceBookId, source: sourceId) ??
             MediaItem(
-              id: shuqiId,
+              id: sourceBookId!,
               title: book.title,
               cover: book.cover,
               author: '',
               badge: '',
               ep: '',
               kind: 'book',
-              source: shuqiSourceId,
+              source: sourceId,
             );
   final cached = await store.cachedChapterIds(book.id);
   if (cached.isEmpty || !context.mounted) return false;
@@ -248,7 +267,9 @@ Future<bool> openCachedBook(
     MaterialPageRoute<void>(
       builder: (_) => ReaderPage(
         bookId: book.id,
-        title: book.title,
+        title: sourceItem?.title.isNotEmpty == true
+            ? sourceItem!.title
+            : book.title,
         cover: book.cover,
         chapters: book.chapters,
         startIndex: index,
@@ -257,12 +278,19 @@ Future<bool> openCachedBook(
         chapterCache: store,
         readerStore: historyStore,
         shelfItem: sourceItem,
-        localOnly: shuqiId != null,
+        localOnly: true,
+        readOfflineCache: true,
         // This is an offline entry. A missing chapter must never fall through
         // to the default Fanqie loader or silently become a network request.
-        chapterLoader: shuqiId == null
+        chapterLoader: sourceId == null
             ? null
-            : (_) => Future<String>.error(StateError('此书旗章节未缓存，请联网后从书旗详情打开')),
+            : (_) => Future<String>.error(
+                StateError(
+                  sourceId == shuqiSourceId
+                      ? '书旗章节未缓存，请联网后从书源详情打开'
+                      : '此章节未缓存，请联网后从书源详情打开',
+                ),
+              ),
       ),
     ),
   );

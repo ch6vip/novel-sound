@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:hive_ce/hive.dart';
 
+import '../models/novel_plugin_book_id.dart';
 import 'encrypted_hive.dart';
 
 /// A local reading location, independent of underlines and shelf membership.
@@ -118,6 +119,33 @@ class ReaderBookmarkStore {
     _writes = operation.then<void>((_) {}, onError: (Object _) {});
     return operation;
   }
+
+  Future<void> mergeFanqiePluginBookmarks(String bookId) =>
+      _serialize((box) async {
+        final alias = novelPluginBookId('fanqie', bookId);
+        final moved = <String>[];
+        for (final key in box.keys.toList()) {
+          final old = ReaderBookmark.fromMap(box.get(key));
+          if (old == null || old.bookId != alias) continue;
+          final updated = ReaderBookmark(
+            bookId: bookId,
+            chapterId: old.chapterId,
+            title: old.title,
+            text: old.text,
+            sourceOffset: old.sourceOffset,
+            createdAt: old.createdAt,
+          );
+          final existing = ReaderBookmark.fromMap(box.get(updated.key));
+          if (existing == null || updated.createdAt > existing.createdAt) {
+            await box.put(updated.key, updated.toMap());
+          }
+          moved.add(old.key);
+        }
+        if (moved.isEmpty) return;
+        await box.flush();
+        await box.deleteAll(moved);
+        changes.value++;
+      });
 
   Future<List<ReaderBookmark>> loadBook(String bookId) => _serialize((
     box,

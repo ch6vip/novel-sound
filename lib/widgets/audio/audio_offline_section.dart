@@ -21,6 +21,7 @@ class AudioOfflineSection extends StatefulWidget {
     required this.chapters,
     this.downloader,
     this.store,
+    this.source,
   });
 
   final String bookId;
@@ -34,6 +35,7 @@ class AudioOfflineSection extends StatefulWidget {
   /// 测试注入用；生产走单例。
   final AudioDownloader? downloader;
   final AudioDownloadStore? store;
+  final AudioDownloadSource? source;
 
   @override
   State<AudioOfflineSection> createState() => _AudioOfflineSectionState();
@@ -128,6 +130,7 @@ class _AudioOfflineSectionState extends State<AudioOfflineSection> {
           chapters: widget.chapters,
         ),
         chapters: pending,
+        source: widget.source,
       );
     } on ArgumentError catch (error) {
       if (mounted) setState(() => _error = '无法下载：${error.message}');

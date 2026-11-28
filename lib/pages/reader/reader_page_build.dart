@@ -655,8 +655,7 @@ extension _ReaderPageBuild on _ReaderPageState {
             !_readerBookIsImported &&
             !_loading &&
             _error == null &&
-            _ideas.total > 0 &&
-            _chapterEndParagraph() != null,
+            _ideas.hasChapterComments,
         inShelf: inShelf(_shelfEntry),
         onBack: () => Navigator.of(context).pop(),
         onCache: () => unawaited(_showCache()),
@@ -710,10 +709,7 @@ extension _ReaderPageBuild on _ReaderPageState {
                 label: '缓存',
                 onPressed: () => Navigator.pop(menu, 'cache'),
               ),
-            if (!_loading &&
-                _error == null &&
-                _ideas.total > 0 &&
-                _chapterEndParagraph() != null)
+            if (!_loading && _error == null && _ideas.hasChapterComments)
               GlassMenuItem(
                 key: ValueKey('${keyPrefix}reader-toolbar-chapter-comments'),
                 icon: CupertinoIcons.chat_bubble,

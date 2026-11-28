@@ -47,12 +47,14 @@ class AuthorPage extends StatefulWidget {
   final String authorId;
   final String fallbackName;
   final AuthorLoader? loader;
+  final String? sourceId;
 
   const AuthorPage({
     super.key,
     required this.authorId,
     this.fallbackName = '',
     this.loader,
+    this.sourceId,
   });
 
   @override
@@ -452,7 +454,7 @@ class _AuthorPageState extends State<AuthorPage> {
 
   void _openWork(AuthorWork work) {
     if (work.id.isEmpty) return;
-    openBookDetail(context, _asItem(work));
+    openBookDetail(context, _asItem(work).copyWith(source: widget.sourceId));
   }
 }
 

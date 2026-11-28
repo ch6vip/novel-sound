@@ -227,7 +227,7 @@ void main() {
 
   for (final unavailable in ['ciphertext', 'failure', 'empty']) {
     test(
-      'API $unavailable falls back to readable text and marks it incomplete',
+      'API $unavailable keeps paragraph IDs from the fallback response',
       () async {
         final paths = <String>[];
         final api = ApiClient(
@@ -255,7 +255,9 @@ void main() {
             }
             return _json({
               'code': 200,
-              'data': {'content': '<p>&lt;b&gt;正文&lt;/b&gt;</p>'},
+              'data': {
+                'chapter': {'content': '<p idx="17">&lt;b&gt;正文&lt;/b&gt;</p>'},
+              },
             });
           }),
         );
@@ -266,6 +268,12 @@ void main() {
         ]);
         expect(_sequence(content), ['<b>正文</b>']);
         expect(content.illustrationsChecked, isFalse);
+        expect(content.paragraphIdsChecked, isTrue);
+        final cached = ChapterContent.fromCacheText(content.toCacheText());
+        expect(
+          cached.blocks.whereType<ChapterParagraph>().single.paraIndex,
+          17,
+        );
       },
     );
   }

@@ -15,6 +15,7 @@ pub(crate) mod playback_trace;
 pub fn reset_playback_route_state_for_tests() {
     playback_routes::reset_state_for_tests();
 }
+#[cfg(any(not(target_os = "android"), feature = "service"))]
 pub mod shuqi;
 
 pub use client::{ClientError, PinnedDevice, UpstreamClient, UpstreamRequest};

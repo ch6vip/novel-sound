@@ -2,16 +2,22 @@ part of '../reader_page.dart';
 
 extension _ReaderBookPanel on _ReaderPageState {
   bool get _readerBookIsImported =>
-      ImportedBookStore.isLocalBookId(widget.bookId) ||
-      ImportedBookStore.isLocalBookId(_shelfEntry.id);
+      parseNovelPluginBookId(widget.bookId) == null &&
+      (ImportedBookStore.isLocalBookId(widget.bookId) ||
+          ImportedBookStore.isLocalBookId(_shelfEntry.id));
 
   bool get _canOpenReaderDetails =>
       !_readerBookIsImported &&
-      (_shelfEntry.source == 'fanqie' || isShuqiItem(_shelfEntry));
+      (_shelfEntry.source == 'fanqie' ||
+          isShuqiItem(_shelfEntry) ||
+          parseNovelPluginBookId(widget.bookId) != null);
 
-  // AuthorPage uses the Fanqie author API; other sources have no matching route.
   bool get _canOpenReaderAuthor =>
-      !_readerBookIsImported && _shelfEntry.source == 'fanqie';
+      !_readerBookIsImported &&
+      !widget.localOnly &&
+      (widget.novelCapabilities?.supports(NovelCapability.author) ??
+          (_shelfEntry.source == 'fanqie' &&
+              parseNovelPluginBookId(widget.bookId) == null));
 
   Future<BookDetail> _loadReaderBookDetail() async {
     final supplied = widget.bookDetail;
@@ -35,7 +41,7 @@ extension _ReaderBookPanel on _ReaderPageState {
     try {
       return await (_readerBookDetailFuture ??= loader != null
           ? loader()
-          : ApiClient().bookDetail(widget.bookId));
+          : (widget.novelApi ?? ApiClient()).bookDetail(widget.bookId));
     } catch (_) {
       _readerBookDetailFuture = null;
       rethrow;
@@ -117,8 +123,14 @@ extension _ReaderBookPanel on _ReaderPageState {
     await Navigator.push<void>(
       context,
       MaterialPageRoute(
-        builder: (_) =>
-            AuthorPage(authorId: author.id, fallbackName: author.name),
+        builder: (_) => AuthorPage(
+          authorId: author.id,
+          fallbackName: author.name,
+          loader:
+              widget.novelCapabilities?.author ??
+              widget.novelApi?.authorProfile,
+          sourceId: widget.shelfItem?.source,
+        ),
       ),
     );
   }
@@ -128,18 +140,7 @@ extension _ReaderBookPanel on _ReaderPageState {
     _setControlsVisible(false);
     _readerPanelOpen = false;
     _syncDesktopShell();
-    await Navigator.push<void>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => isShuqiItem(_shelfEntry)
-            ? ShuqiDetailPage(
-                bookId: _shelfEntry.id,
-                initialTitle: widget.title,
-                initialCover: widget.cover,
-              )
-            : DetailPage(item: _shelfEntry, autoOpenReader: false),
-      ),
-    );
+    await openBookDetail(context, _shelfEntry, allowAutoOpen: false);
   }
 
   Future<void> _showClassicBookPanel() async {

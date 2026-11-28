@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:hive_ce/hive.dart';
 
 import '../models/media_item.dart';
+import '../models/novel_plugin_book_id.dart';
+
 import 'chapter_cache_bytes.dart';
 import 'encrypted_hive.dart';
 import 'secure_key_provider.dart';
@@ -292,6 +294,63 @@ class ChapterCacheStore implements ChapterCache {
     chapterCount: (record['cachedChapterCount'] as num?)?.toInt() ?? 0,
     byteCount: (record['cachedByteCount'] as num?)?.toInt() ?? 0,
   );
+
+  /// Fold the cache produced by older Fanqie plugins into the original book.
+  /// Serialized with chapter writes so downloads cannot interleave with the merge.
+  Future<void> mergeFanqiePluginCache(String bookId) => _enqueue(() async {
+    final alias = novelPluginBookId('fanqie', bookId);
+    final catalog = await _catalogBox();
+    final from = catalog.get('book:$alias');
+    if (from is! Map) return;
+
+    final data = await _box();
+    final target = catalog.get('book:$bookId');
+    final chapters = <String, Map>{};
+    for (final record in [from, target]) {
+      if (record is! Map || record['chapters'] is! List) continue;
+      for (final chapter in record['chapters'] as List) {
+        if (chapter is Map && chapter['itemId'] is String) {
+          chapters[chapter['itemId'] as String] = chapter;
+        }
+      }
+    }
+    final previousKeys = <String>[];
+    for (final chapterId in _cachedIds(from)) {
+      final oldKey = _key(alias, chapterId);
+      final incoming = data.get(oldKey);
+      if (!_isChapter(incoming)) continue;
+      final old = _map(incoming as Map);
+      final key = _key(bookId, chapterId);
+      final existing = data.get(key);
+      final preferExisting =
+          _isChapter(existing) &&
+          _accessedAt(existing as Map) >= _accessedAt(old);
+      final merged = {
+        ...(preferExisting ? _map(existing) : old),
+        'bookId': bookId,
+      };
+      if (_isPinned(old) ||
+          (_isChapter(existing) && _isPinned(existing as Map))) {
+        merged['pinned'] = true;
+      }
+      await data.put(key, merged);
+      previousKeys.add(oldKey);
+    }
+    final result = <String, dynamic>{
+      ..._map(from),
+      if (target is Map) ..._map(target),
+      'id': bookId,
+      'chapters': chapters.values.toList(),
+    };
+    if (previousKeys.isNotEmpty) await data.flush();
+    await catalog.put('book:$bookId', result);
+    // Index the combined data before removing any alias rows.
+    await _rebuildCatalogueFromData(catalog, data);
+    await catalog.flush();
+    if (previousKeys.isNotEmpty) await data.deleteAll(previousKeys);
+    await catalog.delete('book:$alias');
+    changes.value++;
+  });
 
   @override
   Future<String?> read({required String bookId, required String chapterId}) =>

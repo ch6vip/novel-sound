@@ -14,6 +14,7 @@ import '../services/api_client.dart';
 import '../services/drama_feature_preferences.dart';
 import '../services/app_theme_style.dart';
 import '../services/backend_transport.dart';
+import '../services/novel_plugins.dart';
 import '../services/desktop_platform.dart';
 import '../services/search_filters.dart';
 import '../services/search_history_store.dart';
@@ -29,10 +30,10 @@ import '../widgets/search/classic_search_result_row.dart';
 import '../widgets/search/classic_search_scope_bar.dart';
 import '../widgets/search/search_discovery.dart';
 import '../widgets/search/search_media_tile.dart';
-import '../widgets/search/search_score_filter.dart';
 import '../widgets/wenku/wenku_ui.dart';
 import 'detail_page.dart';
 import 'search_shuqi.dart';
+import 'novel_plugins_page.dart';
 
 typedef SearchPageLoader =
     Future<List<SearchTab>> Function(
@@ -162,6 +163,21 @@ class SearchRoute<T> extends PageRouteBuilder<T> {
   }
 }
 
+Future<void> openNovelPluginSearch(
+  BuildContext context, {
+  String query = '',
+  String? sourceId,
+}) => Navigator.of(context).push(
+  SearchRoute.open<void>(
+    context,
+    builder: (_) => SearchPage(
+      initialQuery: query,
+      initialCategory: SearchCategory.book,
+      novelSourceId: sourceId,
+    ),
+  ),
+);
+
 class SearchPage extends StatefulWidget {
   final String? initialQuery;
 
@@ -171,6 +187,8 @@ class SearchPage extends StatefulWidget {
   final SearchPageLoader? searchLoader;
   final Future<MediaItem?> Function(String id)? idSearchLoader;
   final SearchHistoryRepository? historyStore;
+  final String? novelSourceId;
+  final NovelPluginRegistry? novelRegistry;
 
   /// 打开时选中的分类页签。分区入口把语境带进来：短剧分区从漫剧频道进
   /// 搜索落「漫剧」，其余频道落「短剧」；缺省仍是「综合」。
@@ -192,6 +210,8 @@ class SearchPage extends StatefulWidget {
     this.searchLoader,
     this.idSearchLoader,
     this.historyStore,
+    this.novelSourceId,
+    this.novelRegistry,
     this.suggestLoader,
     this.hotSearchLoader,
     this.shuqiSearchLoader,
@@ -203,20 +223,73 @@ class SearchPage extends StatefulWidget {
 }
 
 class _SearchPageState extends State<SearchPage> {
+  bool get _usesNovelPlugins =>
+      widget.searchLoader == null && widget.shuqiSearchLoader == null;
+
+  late final _plugins = widget.novelRegistry ?? NovelPluginRegistry.instance;
+  bool get _pluginBookMode =>
+      _usesNovelPlugins &&
+      _plugins.supportsZipPackages &&
+      widget.initialCategory == SearchCategory.book;
+  NovelPlugin? _bookPlugin;
+  final _bookSelections = <String, String>{};
+  NovelSourceCapabilities? get _bookCapabilities =>
+      _bookPlugin == null ? null : _plugins.source(_bookPlugin!.id).optional;
+
+  NovelPlugin? _preferredBookPlugin() {
+    final id = _bookPlugin?.id ?? widget.novelSourceId;
+    return (id == null ? null : _plugins.plugin(id)) ??
+        _plugins.plugins.firstOrNull;
+  }
+
+  void _selectBookPlugin(NovelPlugin? plugin) {
+    if (identical(_bookPlugin, plugin)) return;
+    setState(() {
+      _bookPlugin = plugin;
+      _bookSelections.clear();
+      _hot = HotSearch.empty;
+    });
+    if (_ctrl.text.trim().isEmpty) {
+      _showHistory();
+    } else {
+      unawaited(_search(_ctrl.text));
+    }
+    unawaited(_loadHotSearch());
+  }
+
+  ApiClient? _fanqieApi;
+  void _pluginsChanged() {
+    if (!mounted) return;
+    if (_pluginBookMode) {
+      final source = _preferredBookPlugin();
+      if (identical(source, _bookPlugin)) {
+        setState(() {});
+      } else {
+        _selectBookPlugin(source);
+      }
+      return;
+    }
+    final api = _plugins.fanqieApi;
+    if (identical(api, _fanqieApi)) return;
+    setState(() => _fanqieApi = api);
+    unawaited(_loadHotSearch());
+    if (_query.isNotEmpty) {
+      unawaited(_search(_query, asKeyword: _idQuery == null));
+    }
+  }
+
   static const _paginationThreshold = 480.0;
   late final _showDrama = DramaFeaturePreferences.instance.enabled.value;
   late final _categories = [
     for (final category in SearchCategory.values)
-      if (_showDrama || !_isDramaKind(category.kind)) category,
+      if (_pluginBookMode
+          ? category == SearchCategory.book
+          : _showDrama || !_isDramaKind(category.kind))
+        category,
   ];
 
   static bool _isDramaKind(String? kind) => kind == 'video' || kind == 'manju';
   static const _listViewPreference = 'search_list_view';
-  static const _minimumScorePreference = 'search_minimum_score';
-
-  /// The thresholds the dropdown offers; storage may only hold one of these.
-  static const _scoreThresholds = <double>[0, 8, 9];
-
   final TextEditingController _ctrl = TextEditingController();
   final ScrollController _scrollController = ScrollController(
     keepScrollOffset: false,
@@ -240,10 +313,7 @@ class _SearchPageState extends State<SearchPage> {
   String? _idQuery;
   int _tabIndex = 0;
   int _requestGeneration = 0;
-  double _minimumScore = 0;
-
-  /// 状态 / 字数 / 分类词的二次筛选,只作用于番茄关键词结果。
-  SearchFilters _filters = const SearchFilters();
+  String? _entryTag;
 
   /// Upstream search results are always `NovelRow` lists; the cover grid is
   /// an opt-in that fqapp persists.
@@ -266,12 +336,6 @@ class _SearchPageState extends State<SearchPage> {
   /// 本地存档里的版式；null 表示用户从没手动选过，保持上游默认列表。
   bool? _savedLayout;
   Future<void> _layoutWrite = Future<void>.value();
-
-  /// Guards against a late preference read overwriting a choice the user
-  /// already made while the read was in flight (same contract as
-  /// [_layoutChosen]).
-  bool _scoreChosen = false;
-  Future<void> _scoreWrite = Future<void>.value();
 
   /// In-flight search / id-lookup. Superseded searches and page disposal cancel
   /// it so a fast typist does not leave a queue of upstream requests behind.
@@ -307,22 +371,58 @@ class _SearchPageState extends State<SearchPage> {
   /// query, i.e. the user is refining rather than reading results.
   bool get _showSuggestions => _suggestions.isNotEmpty && _refining;
 
-  SearchSuggestLoader get _suggestLoader =>
-      widget.suggestLoader ??
-      (widget.searchLoader != null || widget.idSearchLoader != null
-          ? (_) async => const <SearchSuggestion>[]
-          : ApiClient.instance.searchSuggestions);
+  SearchSuggestLoader get _suggestLoader => _pluginBookMode
+      ? _bookCapabilities!.searchSuggestions
+      : widget.suggestLoader ??
+            (widget.searchLoader != null || widget.idSearchLoader != null
+                ? (_) async => const <SearchSuggestion>[]
+                : _fanqieApi == null
+                ? ApiClient.instance.searchSuggestions
+                : _fanqieSuggestions);
 
-  HotSearchLoader get _hotLoader =>
-      widget.hotSearchLoader ??
-      (widget.searchLoader != null || widget.idSearchLoader != null
-          ? () async => HotSearch.empty
-          : ApiClient.instance.hotSearch);
+  Future<List<SearchSuggestion>> _fanqieSuggestions(String query) async {
+    final api = _fanqieApi;
+    if (api == null) return const [];
+    final suggestions = await api.searchSuggestions(query);
+    if (suggestions.isNotEmpty || !identical(api, _fanqieApi)) {
+      return suggestions;
+    }
+    try {
+      final tabs = await api.searchTabs(query, tabType: 3, offset: 0);
+      return [
+        for (final title in {
+          for (final tab in tabs)
+            for (final item in tab.items)
+              if (item.kind == 'book' && item.title.trim().isNotEmpty)
+                item.title,
+        }.take(6))
+          SearchSuggestion(text: title),
+      ];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  HotSearchLoader get _hotLoader => _pluginBookMode
+      ? _bookCapabilities!.hotSearch
+      : widget.hotSearchLoader ??
+            (widget.searchLoader != null || widget.idSearchLoader != null
+                ? () async => HotSearch.empty
+                : (_fanqieApi ?? ApiClient.instance).hotSearch);
 
   @override
   void initState() {
     super.initState();
     if (isWindowsDesktop) DesktopShellState.enterSearch();
+    if (_usesNovelPlugins) {
+      if (_pluginBookMode) {
+        _bookPlugin = _preferredBookPlugin();
+      } else {
+        _fanqieApi = _plugins.fanqieApi;
+      }
+      _plugins.addListener(_pluginsChanged);
+      unawaited(_plugins.load().catchError((Object _) {}));
+    }
     // 首帧就停在该页签：分区入口（短剧/漫剧）进来的搜索不该先闪「综合」。
     _tabIndex = _categories
         .indexOf(widget.initialCategory)
@@ -330,10 +430,9 @@ class _SearchPageState extends State<SearchPage> {
     _scrollController.addListener(_onScroll);
     _loadHistory();
     unawaited(_loadLayout());
-    unawaited(_loadMinimumScore());
     unawaited(_loadHotSearch());
     final tag = widget.initialTag?.trim() ?? '';
-    if (tag.isNotEmpty) _filters = _filters.copyWith(tag: tag);
+    if (!_pluginBookMode && tag.isNotEmpty) _entryTag = tag;
     final query = widget.initialQuery?.trim() ?? '';
     final initial = query.isNotEmpty ? query : tag;
     if (initial.isNotEmpty) {
@@ -361,45 +460,6 @@ class _SearchPageState extends State<SearchPage> {
     } catch (_) {
       // Search remains usable if local preferences cannot be read.
     }
-  }
-
-  /// Restores the rating threshold the viewer picked last time.
-  ///
-  /// The dropdown used to reset to 「评分不限」 on every visit, so a viewer who
-  /// only reads well-rated works had to re-pick the threshold after each
-  /// search. Only the two offered thresholds are accepted; anything else in
-  /// storage is treated as 「不限」 rather than filtered invisibly.
-  Future<void> _loadMinimumScore() async {
-    try {
-      final preferences = await SharedPreferences.getInstance();
-      if (!mounted || _scoreChosen) return;
-      final saved = preferences.getDouble(_minimumScorePreference);
-      if (saved == null || !_scoreThresholds.contains(saved)) return;
-      setState(() => _minimumScore = saved);
-    } catch (_) {
-      // Search remains usable if local preferences cannot be read.
-    }
-  }
-
-  void _selectMinimumScore(double value) {
-    setState(() {
-      _scoreChosen = true;
-      _minimumScore = value;
-    });
-    // Serialize rapid picks so the final user choice is persisted last.
-    _scoreWrite = _scoreWrite.then((_) async {
-      try {
-        final preferences = await SharedPreferences.getInstance();
-        if (!await preferences.setDouble(_minimumScorePreference, value)) {
-          throw StateError('Search rating threshold was not saved');
-        }
-      } catch (_) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('评分筛选未保存，本次选择仍有效')));
-      }
-    });
   }
 
   void _toggleLayout() {
@@ -431,44 +491,76 @@ class _SearchPageState extends State<SearchPage> {
     });
   }
 
-  /// 书旗条目没有上游评分，且评分下拉在书旗模式下禁用；阈值不能过滤整批结果。
-  bool _matchesScore(MediaItem item) =>
-      _idQuery != null ||
-      _shuqiSource ||
-      _minimumScore == 0 ||
-      (item.score != null && item.score! >= _minimumScore);
+  bool get _hasResultFilters =>
+      _bookSelections.isNotEmpty ||
+      (_entryTag != null && _idQuery == null && !_shuqiSource);
 
-  /// 二次筛选(分类词 / 状态 / 字数)只对**番茄关键词结果**生效。书旗来源
-  /// 没有这套上游字段,ID 直查只有单条命中:两者都直接放行,避免切换来源
-  /// 后看不见的番茄筛选状态把结果整批滤掉。
-  bool get _filtersEnabled => _idQuery == null && !_shuqiSource;
+  bool get _hasLocalResultFilters =>
+      (_entryTag != null && _idQuery == null && !_shuqiSource) ||
+      (_bookPlugin?.searchFilters.any(
+            (filter) =>
+                filter.field != null && _bookSelections.containsKey(filter.id),
+          ) ??
+          false);
 
-  /// 当前结果视口的完整过滤:评分 + 只对番茄关键词结果生效的二次筛选。
-  bool _matchesFilters(MediaItem item) =>
-      _matchesScore(item) && (!_filtersEnabled || _filters.matches(item));
-
-  /// 应用一组新的二次筛选,并在需要时补一次分页检查。
-  ///
-  /// 筛选会缩小可见集合,视图底部可能因此出现空档;这里复用滚动分页的
-  /// 判定(见 [_scheduleLoadMoreIfNeeded]),让它按既有的“新一页没有新增
-  /// 可见结果就停下”的规则补页,而不会无界连发请求。
-  void _setFilters(SearchFilters next) {
-    if (!mounted) return;
-    setState(() => _filters = next);
-    _scheduleLoadMoreIfNeeded(_tabIndex, _requestGeneration);
+  bool _matchesFilters(MediaItem item) {
+    if (!_pluginBookMode) {
+      return _idQuery != null ||
+          _shuqiSource ||
+          SearchFilters(tag: _entryTag).matches(item);
+    }
+    for (final filter
+        in _bookPlugin?.searchFilters ?? const <NovelSearchFilter>[]) {
+      final value = _bookSelections[filter.id];
+      if (value == null || filter.field == null) continue;
+      final option = filter.options.firstWhere((option) => option.id == value);
+      if (!filter.matches(item, option)) return false;
+    }
+    return true;
   }
 
-  /// 空态里的“清除筛选”:一次清掉评分和二次筛选,回到纯关键词结果。
+  void _reloadPluginBooks() {
+    setState(() {
+      ++_requestGeneration;
+      _feeds[_tabIndex] = _SearchFeed();
+    });
+    unawaited(_loadPluginBooks(_tabIndex));
+  }
+
+  void _setBookFilter(NovelSearchFilter filter, String value) {
+    if ((_bookSelections[filter.id] ?? '') == value) return;
+    setState(() {
+      if (value.isEmpty) {
+        _bookSelections.remove(filter.id);
+      } else {
+        _bookSelections[filter.id] = value;
+      }
+    });
+    if (filter.field == null) {
+      _reloadPluginBooks();
+    } else {
+      _scheduleLoadMoreIfNeeded(_tabIndex, _requestGeneration);
+    }
+  }
+
   void _clearLoadedFilters() {
-    if (!mounted) return;
-    if (_minimumScore > 0) _selectMinimumScore(0);
-    _setFilters(const SearchFilters());
+    final reload =
+        _bookPlugin?.searchFilters.any(
+          (filter) =>
+              filter.field == null && _bookSelections.containsKey(filter.id),
+        ) ??
+        false;
+    setState(() {
+      _entryTag = null;
+      _bookSelections.clear();
+    });
+    if (reload) _reloadPluginBooks();
   }
 
   /// 结果条目的来源限定身份。书旗和番茄各自有自己的 id 命名空间，不能只按
   /// id 或 kind 匹配。
   String _resultIdentity(MediaItem item) =>
-      '${_shuqiSource ? 'shuqi' : 'fanqie'}:${item.kind}:${item.id}';
+      '${item.source}:${item.kind}:${item.id}';
 
   /// [KeyedSubtree] 的类型在两种主题、列表/网格之间保持一致，GlobalKey 才能
   /// 在同一帧里跟着内容移动；行/卡片自身仍保留原来的 ValueKey。
@@ -586,11 +678,16 @@ class _SearchPageState extends State<SearchPage> {
     }
     final viewport = _resultViewport(items);
     if (viewport == null) return;
-    final desiredTop =
-        _visibleResultTop(viewport) - anchor.distanceAboveVisibleTop;
+    final visibleTop = _visibleResultTop(viewport);
     final box = _resultBox(items[index]);
     if (box != null) {
       final top = box.localToGlobal(Offset.zero, ancestor: viewport).dy;
+      // A shorter row still needs to be visible after switching layouts.
+      final distance = math.min(
+        anchor.distanceAboveVisibleTop,
+        math.max(0.0, box.size.height - 1),
+      );
+      final desiredTop = visibleTop - distance;
       final target = _clampScrollOffset(
         _scrollController.offset + top - desiredTop,
       );
@@ -603,7 +700,7 @@ class _SearchPageState extends State<SearchPage> {
     final estimate = _estimateScrollOffsetForIndex(
       items,
       index,
-      desiredTop,
+      visibleTop - anchor.distanceAboveVisibleTop,
       viewport,
     );
     if (estimate != null) {
@@ -692,9 +789,18 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Future<void> _loadHotSearch() async {
-    final hot = await _hotLoader();
-    if (!mounted || hot.isEmpty) return;
-    setState(() => _hot = hot);
+    if (_pluginBookMode &&
+        _bookCapabilities?.supports(NovelCapability.hotSearch) != true) {
+      return;
+    }
+    final source = _bookPlugin;
+    try {
+      final hot = await _hotLoader();
+      if (!mounted || !identical(source, _bookPlugin) || hot.isEmpty) return;
+      setState(() => _hot = hot);
+    } on Exception {
+      // Discovery can fail independently of the search itself.
+    }
   }
 
   /// Debounced so a fast typist does not issue a request per keystroke.
@@ -713,7 +819,12 @@ class _SearchPageState extends State<SearchPage> {
       return;
     }
     // 书旗没有番茄的联想词接口；未提交的文字只用来过滤本地历史。
-    if (_shuqiSource) return;
+    if (_shuqiSource ||
+        (_pluginBookMode &&
+            _bookCapabilities?.supports(NovelCapability.searchSuggestions) !=
+                true)) {
+      return;
+    }
     _suggestDebounce = Timer(
       const Duration(milliseconds: 250),
       () => unawaited(_fetchSuggestions(query, generation)),
@@ -721,7 +832,12 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Future<void> _fetchSuggestions(String query, int generation) async {
-    final suggestions = await _suggestLoader(query);
+    List<SearchSuggestion> suggestions;
+    try {
+      suggestions = await _suggestLoader(query);
+    } on Exception {
+      return;
+    }
     // A late response must not overwrite a newer query's suggestions.
     if (!mounted ||
         generation != _suggestGeneration ||
@@ -769,7 +885,9 @@ class _SearchPageState extends State<SearchPage> {
       _draft = query;
       _suggestions = const [];
       // 书旗 id 是另一套命名空间，按 id 直查不适用。
-      _idQuery = (_shuqiSource || asKeyword) ? null : mediaIdFromSearch(query);
+      _idQuery = (_shuqiSource || _pluginBookMode || asKeyword)
+          ? null
+          : mediaIdFromSearch(query);
       _feeds = [for (final _ in _categories) _SearchFeed()];
     });
     if (_shuqiSource) {
@@ -938,10 +1056,25 @@ class _SearchPageState extends State<SearchPage> {
     try {
       _activeRequest?.cancel();
       final request = _activeRequest = BackendRequest();
-      final item = await ApiClient.instance.withCancellation(
-        request,
-        () => (widget.idSearchLoader ?? ApiClient.instance.lookupMediaById)(id),
-      );
+      final item = await ApiClient.instance.withCancellation(request, () async {
+        final custom = widget.idSearchLoader;
+        if (custom != null) return custom(id);
+        final api = _fanqieApi;
+        if (_usesNovelPlugins && api != null) {
+          try {
+            final novel = await api.lookupMediaById(id);
+            if (novel?.kind == 'book') return novel;
+          } on Exception {
+            if (_categories[_tabIndex] == SearchCategory.book) rethrow;
+          }
+        }
+        if (_usesNovelPlugins &&
+            _categories[_tabIndex] == SearchCategory.book) {
+          return null;
+        }
+        final result = await ApiClient.instance.lookupMediaById(id);
+        return _usesNovelPlugins && result?.kind == 'book' ? null : result;
+      });
       if (!mounted || generation != _requestGeneration) return;
       setState(() {
         for (var index = 0; index < _categories.length; index++) {
@@ -969,7 +1102,40 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   // Note: 分类来源、游标与请求隔离见 .agents/notes/implemented/bug-fix/2026-09-10-search-categories.md
+  Future<({SearchTab? page, Object? error})> _fetchSearch(
+    SearchPageLoader loader,
+    String query,
+    SearchCategory category,
+    int offset,
+  ) async {
+    try {
+      final tabs = await loader(
+        query,
+        tabType: category.tabType,
+        offset: offset,
+      );
+      final matching = tabs
+          .where(
+            (tab) =>
+                tab.title == category.sourceTitle ||
+                tab.title == category.title,
+          )
+          .toList();
+      final page = separateManjuSearchTabs(matching).firstWhere(
+        (tab) =>
+            tab.title == category.title ||
+            (category == SearchCategory.book &&
+                tab.title == category.sourceTitle),
+        orElse: () => SearchTab(title: category.title, items: []),
+      );
+      return (page: page, error: null);
+    } catch (error) {
+      return (page: null, error: error);
+    }
+  }
+
   Future<void> _loadTab(int index) async {
+    if (_pluginBookMode) return _loadPluginBooks(index);
     if (_shuqiSource) return;
     if (_idQuery != null) return _loadId(_idQuery!);
     final feed = _feeds[index];
@@ -979,7 +1145,6 @@ class _SearchPageState extends State<SearchPage> {
 
     final generation = _requestGeneration;
     final category = _categories[index];
-    final offset = feed.nextOffset;
     setState(() {
       feed.loading = true;
       feed.error = null;
@@ -989,40 +1154,74 @@ class _SearchPageState extends State<SearchPage> {
       final loader = widget.searchLoader ?? ApiClient.instance.searchTabs;
       _activeRequest?.cancel();
       final request = _activeRequest = BackendRequest();
-      final tabs = await ApiClient.instance.withCancellation(
+      final api = _fanqieApi;
+      final query = _query;
+      final loadMain =
+          (!_usesNovelPlugins || category != SearchCategory.book) &&
+          !feed.mainExhausted;
+      final loadNovel =
+          api != null &&
+          !feed.novelExhausted &&
+          (category == SearchCategory.general ||
+              category == SearchCategory.book);
+      const skipped = (page: null, error: null);
+      final (main, novel) = await ApiClient.instance.withCancellation(
         request,
-        () => loader(_query, tabType: category.tabType, offset: offset),
+        () => (
+          loadMain
+              ? _fetchSearch(loader, query, category, feed.nextOffset)
+              : Future.value(skipped),
+          loadNovel
+              ? _fetchSearch(
+                  api.searchTabs,
+                  query,
+                  SearchCategory.book,
+                  feed.nextNovelOffset,
+                )
+              : Future.value(skipped),
+        ).wait,
       );
       if (!mounted || generation != _requestGeneration) return;
 
-      final sources = tabs
-          .where(
-            (tab) =>
-                tab.title == category.sourceTitle ||
-                tab.title == category.title,
-          )
-          .toList();
-      final page = separateManjuSearchTabs(sources).firstWhere(
-        (tab) =>
-            tab.title == category.title ||
-            (category == SearchCategory.book &&
-                tab.title == category.sourceTitle),
-        orElse: () => SearchTab(title: category.title, items: []),
-      );
       final before = feed.items.where(_matchesFilters).length;
       setState(() {
-        for (final item in page.items) {
+        for (final item in [
+          ...?main.page?.items.where(
+            (item) => !_usesNovelPlugins || item.kind != 'book',
+          ),
+          ...?novel.page?.items.where((item) => item.kind == 'book'),
+        ]) {
           if (item.id.isEmpty ||
               (!_showDrama && _isDramaKind(item.kind)) ||
-              (category.kind != null && item.kind != category.kind)) {
+              (category.kind != null && category.kind != item.kind)) {
             continue;
           }
           if (feed.seen.add('${item.kind}:${item.id}')) feed.items.add(item);
         }
-        final next = page.nextOffset;
-        feed.hasMore = page.hasMore != false && next != null && next > offset;
-        if (feed.hasMore) feed.nextOffset = next!;
-        feed.initialized = true;
+        if (main.page case final page?) {
+          final next = page.nextOffset;
+          feed.mainExhausted =
+              page.hasMore == false || next == null || next <= feed.nextOffset;
+          if (!feed.mainExhausted) feed.nextOffset = next!;
+        }
+        if (novel.page case final page?) {
+          final next = page.nextOffset;
+          feed.novelExhausted =
+              page.hasMore == false ||
+              next == null ||
+              next <= feed.nextNovelOffset;
+          if (!feed.novelExhausted) feed.nextNovelOffset = next!;
+        }
+        feed.hasMore =
+            (loadMain && !feed.mainExhausted) ||
+            (loadNovel && !feed.novelExhausted);
+        final error = main.error ?? novel.error;
+        feed.error = error == null ? null : userFacingError(error);
+        feed.initialized =
+            feed.initialized ||
+            main.page != null ||
+            novel.page != null ||
+            error == null;
         feed.loading = false;
       });
       // A filtered-empty or duplicate page can still advance. Leave a manual
@@ -1035,6 +1234,55 @@ class _SearchPageState extends State<SearchPage> {
       setState(() {
         feed.loading = false;
         feed.error = userFacingError(e);
+      });
+    }
+  }
+
+  Future<void> _loadPluginBooks(int index) async {
+    final plugin = _bookPlugin;
+    final feed = _feeds[index];
+    if (plugin == null ||
+        _query.isEmpty ||
+        feed.loading ||
+        (feed.initialized && !feed.hasMore)) {
+      return;
+    }
+    final generation = _requestGeneration;
+    setState(() {
+      feed.loading = true;
+      feed.error = null;
+    });
+    try {
+      final page = await _plugins
+          .source(plugin.id)
+          .optional
+          .search(
+            _query,
+            cursor: feed.pluginCursor,
+            selections: Map.of(_bookSelections),
+          );
+      if (!mounted || generation != _requestGeneration) return;
+      final before = feed.items.where(_matchesFilters).length;
+      setState(() {
+        for (final item in page.items) {
+          if (item.id.isNotEmpty && feed.seen.add('${item.kind}:${item.id}')) {
+            feed.items.add(item.copyWith(source: plugin.id));
+          }
+        }
+        final next = page.nextCursor;
+        feed.hasMore = next != null && feed.pluginCursors.add(next);
+        feed.pluginCursor = feed.hasMore ? next : null;
+        feed.initialized = true;
+        feed.loading = false;
+      });
+      if (feed.items.where(_matchesFilters).length > before) {
+        _scheduleLoadMoreIfNeeded(index, generation);
+      }
+    } catch (error) {
+      if (!mounted || generation != _requestGeneration) return;
+      setState(() {
+        feed.loading = false;
+        feed.error = userFacingError(error);
       });
     }
   }
@@ -1062,6 +1310,7 @@ class _SearchPageState extends State<SearchPage> {
 
   @override
   void dispose() {
+    if (_usesNovelPlugins) _plugins.removeListener(_pluginsChanged);
     if (isWindowsDesktop) DesktopShellState.exitSearch();
     ++_requestGeneration;
     ++_suggestGeneration;
@@ -1135,13 +1384,79 @@ class _SearchPageState extends State<SearchPage> {
         children: [
           SizedBox(
             height: FrostedHeader.toolbarHeight,
-            child: Center(child: _searchBar(context)),
+            child: Row(
+              children: [Expanded(child: Center(child: _searchBar(context)))],
+            ),
           ),
-          SizedBox(height: _tabsHeight(context), child: _tabs(context)),
+          SizedBox(
+            height: _tabsHeight(context),
+            child: _pluginBookMode ? _bookSourceBar(context) : _tabs(context),
+          ),
         ],
       ),
     ),
   );
+
+  Widget _bookSourceBar(BuildContext context) {
+    final palette = HomePalette.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: homeGutter),
+      child: Row(
+        children: [
+          if (_bookPlugin case final plugin?)
+            PopupMenuButton<NovelPlugin>(
+              key: const Key('search-plugin-source'),
+              tooltip: '切换书源',
+              color: palette.surface,
+              onSelected: _selectBookPlugin,
+              itemBuilder: (_) => [
+                for (final source in _plugins.plugins)
+                  CheckedPopupMenuItem(
+                    value: source,
+                    checked: identical(plugin, source),
+                    child: Text(source.name),
+                  ),
+              ],
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 7),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 180),
+                      child: Text(
+                        plugin.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: palette.ink),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      LucideIcons.chevron_down,
+                      size: 15,
+                      color: palette.muted,
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            TextButton(
+              onPressed: () => openNovelPlugins(context),
+              child: const Text('导入书源插件'),
+            ),
+          const Spacer(),
+          if (_bookPlugin != null)
+            IconButton(
+              tooltip: '书源插件',
+              icon: const Icon(Icons.extension_outlined),
+              onPressed: () => openNovelPlugins(context),
+            ),
+        ],
+      ),
+    );
+  }
 
   /// Upstream expanded search plate: one 46dp glass capsule holding a 44dp
   /// search glyph, the embedded field and a 46dp close button.
@@ -1165,7 +1480,7 @@ class _SearchPageState extends State<SearchPage> {
               showLeading: false,
               focusNode: _searchFocus,
               controller: _ctrl,
-              hint: _shuqiSource ? '搜索书旗书名或作者' : '搜索名称或作品 ID',
+              hint: _pluginBookMode || _shuqiSource ? '搜索书名或作者' : '搜索名称或作品 ID',
               clearTooltip: '清空',
               onChanged: _onQueryChanged,
               onSubmitted: _search,
@@ -1198,7 +1513,7 @@ class _SearchPageState extends State<SearchPage> {
         // line and let the row scroll instead of wrapping characters.
         final labels = [
           for (final category in _categories) category.title,
-          '书旗',
+          if (!_usesNovelPlugins) '书旗',
         ];
         final scaler = MediaQuery.textScalerOf(context);
         var widest = 0.0;
@@ -1236,7 +1551,7 @@ class _SearchPageState extends State<SearchPage> {
     children: {
       for (var index = 0; index < _categories.length; index++)
         index: Text(_categories[index].title),
-      _shuqiSegment: const Text('书旗'),
+      if (!_usesNovelPlugins) _shuqiSegment: const Text('书旗'),
     },
     onValueChanged: (value) {
       if (value == null) return;
@@ -1277,39 +1592,34 @@ class _SearchPageState extends State<SearchPage> {
       return const SearchSkeleton();
     }
     if (!feed.initialized && feed.error != null) {
-      return _notice(
-        context,
-        ContentNotice(
-          icon: CupertinoIcons.wifi_exclamationmark,
-          title: '搜索失败，请稍后重试',
-          message: feed.error,
-          onRetry: _loadMore,
-        ),
+      final notice = ContentNotice(
+        icon: CupertinoIcons.wifi_exclamationmark,
+        title: '搜索失败，请稍后重试',
+        message: feed.error,
+        onRetry: _loadMore,
       );
+      if (_bookPlugin?.searchFilters.isNotEmpty == true) {
+        return _archiveResultsNotice(context, notice);
+      }
+      return _notice(context, notice);
     }
     final items = feed.items.where(_matchesFilters).toList(growable: false);
     if (items.isEmpty) {
-      final secondaryActive = _filtersEnabled && _filters.isActive;
-      final ratingActive = _filtersEnabled && _minimumScore > 0;
-      final filtered = secondaryActive || ratingActive;
+      final filtered = _hasResultFilters;
       final notice = ContentNotice(
         icon: CupertinoIcons.search,
         title: _idQuery != null
             ? (_feeds.first.items.isEmpty ? '未找到该 ID 对应的作品' : '该分类下没有匹配的作品')
-            : secondaryActive
-            ? '已加载结果中暂无符合筛选的作品'
-            : ratingActive
-            ? '已加载结果中暂无达到评分的作品'
+            : filtered
+            ? '暂无符合筛选的作品'
             : '没有找到相关故事',
         message: _idQuery != null
             ? null
-            : secondaryActive
+            : _hasLocalResultFilters
             ? '筛选只作用于已加载结果，可继续加载更多。'
-            : ratingActive
-            ? '筛选只作用于已加载结果，未评分作品不计入。'
             : '试试更短的名称或作者名',
         onRetry: filtered ? _clearLoadedFilters : null,
-        actionLabel: secondaryActive ? '清除筛选' : '清除评分筛选',
+        actionLabel: '清除筛选',
         secondaryAction: _idQuery != null
             // A missing ID can still be searched as a keyword.
             ? GlassTextButton(
@@ -1325,22 +1635,26 @@ class _SearchPageState extends State<SearchPage> {
       );
       // Keep the heading (and its filter controls) when filtering leaves no
       // rows, so the filters can still be changed in place.
-      if (!filtered) return _notice(context, notice);
-      return Padding(
-        padding: EdgeInsets.only(top: _bodyTopInset(context)),
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 22),
-              child: _resultsHeading(context, 0),
-            ),
-            Expanded(child: notice),
-          ],
-        ),
-      );
+      if (!filtered && _bookPlugin?.searchFilters.isNotEmpty != true) {
+        return _notice(context, notice);
+      }
+      return _archiveResultsNotice(context, notice);
     }
     return _resultItems(context, feed, items);
   }
+
+  Widget _archiveResultsNotice(BuildContext context, Widget notice) => Padding(
+    padding: EdgeInsets.only(top: _bodyTopInset(context)),
+    child: Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 22),
+          child: _resultsHeading(context, 0),
+        ),
+        Expanded(child: notice),
+      ],
+    ),
+  );
 
   Widget _notice(BuildContext context, Widget notice) => Padding(
     padding: EdgeInsets.only(top: _bodyTopInset(context) - 20),
@@ -1373,7 +1687,7 @@ class _SearchPageState extends State<SearchPage> {
       _requestGeneration,
       _tabIndex,
       _shuqiSource,
-      _minimumScore,
+      _bookPlugin?.id,
       _listView,
     )),
     leadingCount: 1,
@@ -1427,66 +1741,41 @@ class _SearchPageState extends State<SearchPage> {
     },
   );
 
-  static const _statusLabels = <int, String>{
-    -1: '状态不限',
-    0: '已完结',
-    1: '连载中',
-    4: '已停更',
-  };
-
-  static const _wordLabels = <int, String>{
-    0: '字数不限',
-    1: '30 万字以下',
-    2: '30–100 万字',
-    3: '100–300 万字',
-    4: '300 万字以上',
-  };
-
-  /// 分类词 + 状态 + 字数 的二次筛选条。任一筛选把结果筛空时,这一行仍然留在
-  /// 空态上方,保证还能原地改条件或一键清除。
-  Widget _filterBar(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: 2, bottom: 4),
-    child: Wrap(
-      spacing: 6,
-      runSpacing: 6,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        if (_filters.tag != null && _filters.tag!.isNotEmpty)
-          _filterPill(
-            context,
-            '分类:${_filters.tag}',
-            active: true,
-            icon: CupertinoIcons.xmark,
-            onTap: () => _setFilters(_filters.copyWith(clearTag: true)),
-          ),
-        _filterMenu(
-          context,
-          _statusLabels[_filters.status] ?? _statusLabels[-1]!,
-          active: _filters.status >= 0,
-          values: _statusLabels,
-          current: _filters.status,
-          onSelected: (value) => _setFilters(_filters.copyWith(status: value)),
-        ),
-        _filterMenu(
-          context,
-          _wordLabels[_filters.wordCount] ?? _wordLabels[0]!,
-          active: _filters.wordCount > 0,
-          values: _wordLabels,
-          current: _filters.wordCount,
-          onSelected: (value) =>
-              _setFilters(_filters.copyWith(wordCount: value)),
-        ),
-        if (_filters.status >= 0 || _filters.wordCount > 0)
-          _filterPill(
-            context,
-            '清除筛选',
-            active: false,
-            icon: CupertinoIcons.arrow_counterclockwise,
-            onTap: () => _setFilters(SearchFilters(tag: _filters.tag)),
-          ),
-      ],
-    ),
-  );
+  Widget? _filterBar(BuildContext context) {
+    final plugin = _bookPlugin;
+    final entryTag = _hasResultFilters ? _entryTag : null;
+    if (plugin?.searchFilters.isNotEmpty != true && entryTag == null) {
+      return null;
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 4),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          if (entryTag != null)
+            _filterPill(
+              context,
+              '分类:$entryTag',
+              active: true,
+              icon: CupertinoIcons.xmark_circle_fill,
+              onTap: _clearLoadedFilters,
+            ),
+          if (plugin != null)
+            for (final filter in plugin.searchFilters)
+              _filterMenu(context, filter, plugin),
+          if (_bookSelections.isNotEmpty)
+            _filterPill(
+              context,
+              '清除筛选',
+              active: false,
+              icon: CupertinoIcons.xmark,
+              onTap: _clearLoadedFilters,
+            ),
+        ],
+      ),
+    );
+  }
 
   Widget _filterPill(
     BuildContext context,
@@ -1510,12 +1799,16 @@ class _SearchPageState extends State<SearchPage> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: active ? FontWeight.w600 : FontWeight.w500,
-                color: active ? scheme.primary : scheme.onSurfaceVariant,
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+                  color: active ? scheme.primary : scheme.onSurfaceVariant,
+                ),
               ),
             ),
             if (icon != null) ...[
@@ -1532,77 +1825,49 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
-  /// 可点开的筛选胶囊:点一下弹底部选择面板。面板关闭后调用方可能已经
-  /// 被销毁(换主题、返回上一页),所以回写前先检查 mounted。
   Widget _filterMenu(
     BuildContext context,
-    String label, {
-    required bool active,
-    required Map<int, String> values,
-    required int current,
-    required ValueChanged<int> onSelected,
-  }) => _filterPill(
-    context,
-    label,
-    active: active,
-    icon: CupertinoIcons.chevron_down,
-    onTap: () async {
-      final picked = await showModalBottomSheet<int>(
-        context: context,
-        showDragHandle: true,
-        builder: (sheetContext) => SafeArea(
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+    NovelSearchFilter filter,
+    NovelPlugin plugin,
+  ) {
+    final current = _bookSelections[filter.id] ?? '';
+    final values = {
+      '': filter.title,
+      for (final option in filter.options) option.id: option.title,
+    };
+    return _filterPill(
+      context,
+      values[current]!,
+      active: current.isNotEmpty,
+      icon: CupertinoIcons.chevron_down,
+      onTap: () async {
+        final picked = await showModalBottomSheet<String>(
+          context: context,
+          showDragHandle: true,
+          builder: (sheetContext) => SafeArea(
+            child: ListView(
+              shrinkWrap: true,
               children: [
-                for (final entry in values.entries)
-                  InkWell(
-                    onTap: () => Navigator.of(sheetContext).pop(entry.key),
-                    child: SizedBox(
-                      height: 48,
-                      child: Row(
-                        children: [
-                          const SizedBox(width: 22),
-                          Expanded(
-                            child: Text(
-                              entry.value,
-                              style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: entry.key == current
-                                    ? FontWeight.w600
-                                    : FontWeight.w400,
-                                color: entry.key == current
-                                    ? Theme.of(sheetContext).colorScheme.primary
-                                    : Theme.of(
-                                        sheetContext,
-                                      ).colorScheme.onSurface,
-                              ),
-                            ),
-                          ),
-                          if (entry.key == current)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 18),
-                              child: Icon(
-                                CupertinoIcons.checkmark_alt,
-                                size: 18,
-                                color: Theme.of(
-                                  sheetContext,
-                                ).colorScheme.primary,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
+                for (final option in values.entries)
+                  ListTile(
+                    title: Text(option.value),
+                    selected: option.key == current,
+                    trailing: option.key == current
+                        ? const Icon(CupertinoIcons.checkmark_alt)
+                        : null,
+                    onTap: () => Navigator.pop(sheetContext, option.key),
                   ),
               ],
             ),
           ),
-        ),
-      );
-      if (!mounted || picked == null || picked == current) return;
-      onSelected(picked);
-    },
-  );
+        );
+        if (!mounted || !identical(plugin, _bookPlugin) || picked == null) {
+          return;
+        }
+        _setBookFilter(filter, picked);
+      },
+    );
+  }
 
   Widget _resultsHeading(BuildContext context, int count) {
     final scheme = Theme.of(context).colorScheme;
@@ -1627,11 +1892,7 @@ class _SearchPageState extends State<SearchPage> {
                 child: AppText(
                   // Upstream says 已显示 when results are filtered locally: the
                   // count only covers loaded pages and grows while paging.
-                  _idQuery == null &&
-                          !_shuqiSource &&
-                          (_minimumScore > 0 || _filters.isActive)
-                      ? '已显示 $count 个结果'
-                      : '找到 $count 个结果',
+                  _hasLocalResultFilters ? '已显示 $count 个结果' : '找到 $count 个结果',
                   maxLines: 1,
                   style: const TextStyle(
                     fontWeight: FontWeight.w600,
@@ -1642,14 +1903,6 @@ class _SearchPageState extends State<SearchPage> {
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (_shuqiSource)
-                    AppText('不提供评分', style: secondary)
-                  else
-                    SearchScoreFilter(
-                      enabled: _idQuery == null,
-                      minimumScore: _minimumScore,
-                      onChanged: _selectMinimumScore,
-                    ),
                   ArchiveIconButton(
                     key: const Key('search-layout-toggle'),
                     tooltip: _listView ? '切换为封面视图' : '切换为列表视图',
@@ -1665,7 +1918,7 @@ class _SearchPageState extends State<SearchPage> {
               ),
             ],
           ),
-          if (_idQuery == null && !_shuqiSource) _filterBar(context),
+          ?_filterBar(context),
           if (_idQuery != null)
             Row(
               children: [
@@ -1677,8 +1930,8 @@ class _SearchPageState extends State<SearchPage> {
                 ),
               ],
             )
-          else if (!_shuqiSource && _minimumScore > 0)
-            AppText('筛选已加载结果，未评分作品不计入；可继续加载更多。', style: secondary),
+          else if (_hasLocalResultFilters)
+            AppText('筛选已加载结果，可继续加载更多。', style: secondary),
         ],
       ),
     );
@@ -1727,13 +1980,20 @@ class _SearchPageState extends State<SearchPage> {
       ),
       body: Column(
         children: [
-          ClassicSearchScopeBar(
-            categories: [for (final category in _categories) category.title],
-            selectedIndex: _tabIndex,
-            shuqi: _shuqiSource,
-            onSelectCategory: _selectTab,
-            onSelectSource: _selectSource,
-          ),
+          if (_pluginBookMode)
+            SizedBox(
+              height: ClassicSearchScopeBar.heightFor(context),
+              child: _bookSourceBar(context),
+            )
+          else
+            ClassicSearchScopeBar(
+              categories: [for (final category in _categories) category.title],
+              selectedIndex: _tabIndex,
+              shuqi: _shuqiSource,
+              showSources: !_usesNovelPlugins,
+              onSelectCategory: _selectTab,
+              onSelectSource: _selectSource,
+            ),
           Expanded(
             child: Align(
               alignment: Alignment.topCenter,
@@ -1770,7 +2030,7 @@ class _SearchPageState extends State<SearchPage> {
       style: TextStyle(fontSize: 14, color: palette.ink),
       decoration: InputDecoration(
         isDense: true,
-        hintText: _shuqiSource ? '搜索书旗书名或作者' : '搜索名称或作品 ID',
+        hintText: _pluginBookMode || _shuqiSource ? '搜索书名或作者' : '搜索名称或作品 ID',
         hintStyle: TextStyle(fontSize: 13.5, color: palette.muted),
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 16,
@@ -1828,14 +2088,10 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Widget _classicToolbar(BuildContext context) => ClassicSearchContentToolbar(
-    shuqi: _shuqiSource,
-    scoreEnabled: _idQuery == null,
-    minimumScore: _minimumScore,
-    onMinimumScore: _selectMinimumScore,
     listView: _listView,
     onToggleLayout: _toggleLayout,
-    showRatingHint: _idQuery == null && !_shuqiSource && _minimumScore > 0,
-    filters: _idQuery == null && !_shuqiSource ? _filterBar(context) : null,
+    showFilterHint: _hasLocalResultFilters,
+    filters: _filterBar(context),
   );
 
   Widget _classicIdHint(BuildContext context) => ClassicSearchIdLookupHint(
@@ -1888,8 +2144,6 @@ class _SearchPageState extends State<SearchPage> {
     }
     final items = feed.items.where(_matchesFilters).toList(growable: false);
     if (items.isEmpty) {
-      final secondaryActive = _filtersEnabled && _filters.isActive;
-      final ratingActive = _filtersEnabled && _minimumScore > 0;
       return _classicResultsShell(
         context,
         Center(
@@ -1897,10 +2151,10 @@ class _SearchPageState extends State<SearchPage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(_classicEmptyMessage(feed)),
-              if (secondaryActive || ratingActive)
+              if (_hasResultFilters)
                 TextButton(
                   onPressed: _clearLoadedFilters,
-                  child: Text(secondaryActive ? '清除筛选' : '清除评分筛选'),
+                  child: const Text('清除筛选'),
                 ),
               if (feed.hasMore || feed.loading || feed.error != null)
                 _classicPaginationFooter(context, feed),
@@ -1926,12 +2180,7 @@ class _SearchPageState extends State<SearchPage> {
     if (_idQuery != null) {
       return _feeds.first.items.isEmpty ? '未找到该 ID 对应的作品' : '该分类下没有匹配的作品';
     }
-    if (!_shuqiSource && _filters.isActive) {
-      return '已加载结果中暂无符合筛选的作品';
-    }
-    if (!_shuqiSource && _minimumScore > 0) {
-      return '已加载结果中暂无达到评分的作品';
-    }
+    if (_hasResultFilters) return '暂无符合筛选的作品';
     return feed.hasMore ? '当前页暂无匹配结果' : '无结果';
   }
 
@@ -1947,7 +2196,7 @@ class _SearchPageState extends State<SearchPage> {
       _requestGeneration,
       _tabIndex,
       _shuqiSource,
-      _minimumScore,
+      _bookPlugin?.id,
       _listView,
     ));
     return LayoutBuilder(
@@ -2080,6 +2329,13 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   void _selectTab(int index) {
+    if (!_pluginBookMode &&
+        _usesNovelPlugins &&
+        _plugins.supportsZipPackages &&
+        _categories[index] == SearchCategory.book) {
+      unawaited(openNovelPluginSearch(context, query: _ctrl.text));
+      return;
+    }
     if (_shuqiSource || index == _tabIndex) return;
     setState(() => _tabIndex = index);
     if (_query.isEmpty) return;
@@ -2142,5 +2398,10 @@ class _SearchFeed {
   bool loading = false;
   bool hasMore = false;
   int nextOffset = 0;
+  int nextNovelOffset = 0;
+  bool mainExhausted = false;
+  bool novelExhausted = false;
+  String? pluginCursor;
+  final pluginCursors = <String>{};
   String? error;
 }

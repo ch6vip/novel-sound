@@ -19,8 +19,7 @@ import 'reader_theme.dart';
 class ReaderIdeasSheet extends StatefulWidget {
   final ChapterIdeas ideas;
 
-  /// Loads one page of the paragraph's comments. [cursor] is the previous
-  /// page's offset, null on the first request.
+  /// Loads one page of comments. The cursor is null on the first request.
   final Future<BookCommentPage> Function(
     ParagraphIdeas paragraph,
     String? cursor,
@@ -34,6 +33,8 @@ class ReaderIdeasSheet extends StatefulWidget {
   /// Replies are read-only here for the same reason as the detail page: the
   /// backend exposes counts but no reaction writes (issue #95).
   final Future<CommentReplyPage> Function(String commentId)? replyLoader;
+  final Future<CommentReplyPage> Function(String commentId, String cursor)?
+  loadMoreReplies;
 
   const ReaderIdeasSheet({
     super.key,
@@ -42,6 +43,7 @@ class ReaderIdeasSheet extends StatefulWidget {
     required this.preset,
     this.initialParaIndex,
     this.replyLoader,
+    this.loadMoreReplies,
   });
 
   @override
@@ -166,7 +168,10 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
     }
     setState(() => _moreStatus = _MoreStatus.fetching);
     try {
-      final next = await widget.loadComments(paragraph, '${page.nextOffset}');
+      final next = await widget.loadComments(
+        paragraph,
+        page.nextCursor ?? '${page.nextOffset}',
+      );
       if (!mounted) return;
       if (Scrollable.recommendDeferredLoadingForContext(context) && _nearEnd) {
         // Still flinging fast: hold the rows so the append lands in an idle
@@ -197,9 +202,10 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
         ...page.comments,
         ...next.comments.where((c) => !seen.contains(c.id)),
       ]),
-      totalCount: next.totalCount,
+      totalCount: next.totalCount > 0 ? next.totalCount : page.totalCount,
       hasMore: next.hasMore,
       nextOffset: next.nextOffset,
+      nextCursor: next.nextCursor,
     );
   }
 
@@ -306,6 +312,7 @@ class _ReaderIdeasSheetState extends State<ReaderIdeasSheet> {
             textColor: _textColor,
             mutedColor: _mutedColor,
             replyLoader: widget.replyLoader,
+            loadMoreReplies: widget.loadMoreReplies,
           );
         },
       ),
@@ -355,12 +362,15 @@ class _CommentRow extends StatefulWidget {
   final Color textColor;
   final Color mutedColor;
   final Future<CommentReplyPage> Function(String commentId)? replyLoader;
+  final Future<CommentReplyPage> Function(String commentId, String cursor)?
+  loadMoreReplies;
 
   const _CommentRow({
     required this.comment,
     required this.textColor,
     required this.mutedColor,
     this.replyLoader,
+    this.loadMoreReplies,
   });
 
   @override
@@ -382,22 +392,50 @@ class _CommentRowState extends State<_CommentRow> {
 
   Future<void> _toggleReplies() async {
     if (_loading) return;
-    // A second tap collapses; the page is kept so reopening is instant.
     if (_replies != null) {
-      setState(() => _replies = null);
+      setState(() {
+        _replies = null;
+        _failed = false;
+      });
       return;
     }
-    final loader = widget.replyLoader;
-    if (loader == null) return;
+    await _loadReplies();
+  }
+
+  Future<void> _loadReplies({String? cursor}) async {
+    if (_loading) return;
+    final previous = _replies;
+    if (cursor == null
+        ? widget.replyLoader == null
+        : widget.loadMoreReplies == null) {
+      return;
+    }
     setState(() {
       _loading = true;
       _failed = false;
     });
     try {
-      final page = await loader(comment.id);
+      final page = await (cursor == null
+          ? widget.replyLoader!(comment.id)
+          : widget.loadMoreReplies!(comment.id, cursor));
       if (!mounted) return;
       setState(() {
-        _replies = page;
+        if (previous == null) {
+          _replies = page;
+        } else {
+          final seen = previous.replies.map((reply) => reply.id).toSet();
+          _replies = CommentReplyPage(
+            replies: [
+              ...previous.replies,
+              ...page.replies.where((reply) => seen.add(reply.id)),
+            ],
+            totalCount: page.totalCount > 0
+                ? page.totalCount
+                : previous.totalCount,
+            hasMore: page.hasMore && page.cursor != cursor,
+            cursor: page.cursor,
+          );
+        }
         _loading = false;
       });
     } catch (_) {
@@ -524,6 +562,16 @@ class _CommentRowState extends State<_CommentRow> {
                     textColor: textColor,
                     mutedColor: mutedColor,
                   ),
+                  if (widget.loadMoreReplies != null &&
+                      loaded.hasMore &&
+                      loaded.cursor.isNotEmpty)
+                    TextButton(
+                      onPressed: _loading
+                          ? null
+                          : () =>
+                                unawaited(_loadReplies(cursor: loaded.cursor)),
+                      child: Text(_loading ? '加载中' : '查看更多回复'),
+                    ),
                 ],
                 if (_failed) ...[
                   const SizedBox(height: 6),

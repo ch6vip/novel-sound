@@ -29,6 +29,8 @@ pub mod error;
 pub mod filter;
 pub mod json;
 mod network;
+#[cfg(all(any(windows, target_os = "android"), feature = "app"))]
+mod novel_wasm;
 #[cfg(any(feature = "app", feature = "service"))]
 pub mod server;
 #[cfg(feature = "service")]

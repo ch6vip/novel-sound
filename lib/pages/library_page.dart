@@ -9,10 +9,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../models/media_item.dart';
+import '../models/novel_plugin_book_id.dart';
 import '../models/shelf_categories.dart';
 import '../models/shelf_identity.dart';
 import '../models/shelf_view_state.dart';
-import '../models/shuqi_book.dart';
 import '../services/app_log.dart';
 import '../services/app_style_tokens.dart';
 import '../services/app_theme.dart';
@@ -26,6 +26,7 @@ import '../services/desktop_platform.dart';
 import '../services/imported_book_store.dart';
 import '../services/haptic_preferences.dart';
 import '../services/library_store.dart';
+import '../services/novel_plugins.dart';
 import '../services/media_history_store.dart';
 import '../services/reader_history.dart';
 import '../services/shelf_group_store.dart';
@@ -437,7 +438,14 @@ mixin _LibraryPageStateBase on State<LibraryPage>, WidgetsBindingObserver {
       if (!mounted) return;
       _cachedContentKeys = {
         for (final summary in books)
-          ShelfIdentity.contentKeyFor('book', summary.book.id),
+          if (parseNovelPluginBookId(summary.book.id) case final plugin?)
+            ShelfIdentity.contentKeyFor(
+              'book',
+              plugin.bookId,
+              source: plugin.source,
+            )
+          else
+            ShelfIdentity.contentKeyFor('book', summary.book.id),
       };
       _cacheScanComplete = true;
       // Rebuild the rows: `cached` is folded into each entry at load time.
@@ -457,7 +465,7 @@ mixin _LibraryPageStateBase on State<LibraryPage>, WidgetsBindingObserver {
 
   Future<void> _checkUpdates() async {
     final cache = widget.cacheStore ?? ChapterCacheStore.instance;
-    // 更新检测只处理番茄小说：书旗走只读会话、本地导入没有上游目录。
+    // 番茄的更新检测跟随已导入的来源，本地导入书籍没有上游目录。
     final books = [
       for (final entry in _shelf)
         if (entry.item.kind == 'book' &&
@@ -469,7 +477,11 @@ mixin _LibraryPageStateBase on State<LibraryPage>, WidgetsBindingObserver {
     for (final item in books) {
       final key = ShelfIdentity.contentKeyOf(item);
       try {
-        final book = await cache.savedCatalogue(item.id);
+        final book =
+            await cache.savedCatalogue(
+              novelPluginBookId(item.source, item.id),
+            ) ??
+            await cache.savedCatalogue(item.id);
         if (!mounted) return;
         if (book != null &&
             book.chapters.length > (_latestChapterCounts[key] ?? 0)) {
@@ -485,18 +497,28 @@ mixin _LibraryPageStateBase on State<LibraryPage>, WidgetsBindingObserver {
       changed = false;
     }
     if (widget.cacheStore == null || widget.chapterCountLoader != null) {
+      final registry = NovelPluginRegistry.instance;
+      final loader = widget.chapterCountLoader;
+      if (loader == null) {
+        try {
+          await registry.load();
+        } catch (_) {
+          return;
+        }
+      }
       final network = await (widget.connectivity ?? probeConnectivity)();
-      if (network?.online == true) {
+      if (network?.online == true &&
+          (loader != null || registry.plugin('fanqie') != null)) {
         for (var i = 0; i < books.length; i += 3) {
           if (!mounted || !_visible) break;
           await Future.wait(
             books.skip(i).take(3).map((item) async {
               final key = ShelfIdentity.contentKeyOf(item);
               try {
-                final count =
-                    await (widget.chapterCountLoader ?? loadBookChapterCount)(
-                      item.id,
-                    );
+                final count = loader != null
+                    ? await loader(item.id)
+                    : (await registry.source(item.source).directory(item.id))
+                          .length;
                 if (!mounted || count <= 0) return;
                 if (_latestChapterCounts[key] != count) changed = true;
                 _latestChapterCounts[key] = count;
@@ -577,7 +599,6 @@ mixin _LibraryPageStateBase on State<LibraryPage>, WidgetsBindingObserver {
   bool _isCached(MediaItem item) =>
       _cacheScanComplete &&
       item.kind == 'book' &&
-      item.source == ShelfIdentity.fanqie &&
       _cachedContentKeys.contains(ShelfIdentity.contentKeyOf(item));
 
   int _todayReadMinutes() {

@@ -22,12 +22,14 @@ import 'services/linux_platform.dart';
 import 'services/ios_platform.dart';
 
 import 'pages/home_page.dart';
+import 'pages/plugin_home_page.dart';
 import 'pages/api_service_page.dart';
 import 'pages/audio_page.dart';
 import 'pages/cached_books_page.dart';
 import 'pages/drama_page.dart';
 import 'pages/library_page.dart';
 import 'pages/mine_page.dart';
+import 'pages/search_page.dart';
 import 'pages/theme_page.dart';
 import 'services/app_log.dart';
 import 'services/frame_stats.dart';
@@ -69,6 +71,7 @@ import 'services/poster_cache.dart';
 import 'services/source_policy_controller.dart';
 import 'services/shelf_group_store.dart';
 import 'services/shelf_store.dart';
+import 'services/novel_plugins.dart';
 import 'services/shelf_view_store.dart';
 import 'services/swipe_guide_store.dart';
 import 'services/third_party_licenses.dart';
@@ -202,6 +205,7 @@ Future<void> _loadLocalData() async {
   final themeStyleFuture = AppThemeStyleStore.instance.load();
 
   await Future.wait<void>([
+    optional(NovelPluginRegistry.instance.load),
     // Load before interactive pages mount, so a saved opt-out applies at launch.
     optional(HapticPreferences.instance.load),
     LibraryStore.instance.init(),
@@ -824,6 +828,9 @@ class _RootShellState extends State<RootShell> with TickerProviderStateMixin {
   Widget _buildTabChild(int index) {
     switch (index) {
       case 0:
+        if (NovelPluginRegistry.instance.supportsZipPackages) {
+          return PluginHomePage(scrollController: _homeScroll);
+        }
         return HomePage(
           scrollController: _homeScroll,
           cueLoader: ApiClient.instance.searchCue,
@@ -999,10 +1006,12 @@ class _RootShellState extends State<RootShell> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    // 后端起不来时保留整屏错误页：原因、重试与服务面板入口都必须在。
-    // 本地服务没起来时用户仍要能进离线阅读、查服务面板、或重置代理再试
-    // （#318 只动成功路径的等待提示）。
-    if (_backendError != null) return _backendFailureView(context);
+    // ZIP 书源和本地书架不依赖本地 HTTP 服务。保持它们挂载，服务失败时
+    // 仍能浏览首页快照和离线章节。
+    final backendFailed = _backendError != null;
+    if (backendFailed && !NovelPluginRegistry.instance.supportsZipPackages) {
+      return _backendFailureView(context);
+    }
     // 成功路径不再整屏遮罩：壳层与首页立刻出现，本地服务在后台静默启动，
     // 等待反馈交给首页自己的骨架。核心就绪后数据直接落位，用户无需重试
     // （传输层会把启动期间的请求排队到核心就绪为止）。
@@ -1014,9 +1023,9 @@ class _RootShellState extends State<RootShell> with TickerProviderStateMixin {
           return LazyIndexedStack(
             index: index,
             children: [
-              HomePage(cueLoader: ApiClient.instance.searchCue),
+              const PluginHomePage(),
               if (DramaFeaturePreferences.instance.enabled.value)
-                const DramaPage()
+                backendFailed ? _backendFailureView(context) : const DramaPage()
               else
                 const SizedBox.shrink(),
               LibraryPage(
@@ -1037,7 +1046,8 @@ class _RootShellState extends State<RootShell> with TickerProviderStateMixin {
     final isDramaTab = _index == 1;
     // 短剧的推荐频道压在全屏视频流上，dock 用深色玻璃；看剧/漫剧/最近/收藏
     // 是浅色页，dock 跟主题走，否则浅色外观下页面是奶白、dock 还是黑的。
-    final dramaOnVideo = isDramaTab && !dramaLightPageNotifier.value;
+    final dramaOnVideo =
+        isDramaTab && !backendFailed && !dramaLightPageNotifier.value;
     // 系统导航栏（Android 底部系统自绘的那条）按当前画布取色。Flutter 的
     // light / dark 两套预设都把它写成纯黑底 + 白图标，浅色页面下会在最底部
     // 留一条突兀的黑带；短剧只有视频流（推荐）背后是视频，仍用黑。
@@ -1107,7 +1117,9 @@ class _RootShellState extends State<RootShell> with TickerProviderStateMixin {
                                 child: RepaintBoundary(
                                   child: TickerMode(
                                     enabled: i == _index,
-                                    child: _tabChild(i),
+                                    child: i == 1 && backendFailed
+                                        ? _backendFailureView(context)
+                                        : _tabChild(i),
                                   ),
                                 ),
                               ),
@@ -1163,6 +1175,19 @@ class _RootShellState extends State<RootShell> with TickerProviderStateMixin {
                 ),
                 const SizedBox(height: 16),
                 const Text('启动失败'),
+                TextButton.icon(
+                  onPressed: () => Navigator.push<void>(
+                    context,
+                    SearchRoute.open<void>(
+                      context,
+                      builder: (_) => const SearchPage(
+                        initialCategory: SearchCategory.book,
+                      ),
+                    ),
+                  ),
+                  icon: const Icon(Icons.search),
+                  label: const Text('小说搜索'),
+                ),
                 TextButton.icon(
                   onPressed: () => Navigator.push(
                     context,

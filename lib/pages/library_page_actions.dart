@@ -220,27 +220,24 @@ mixin _LibraryPageActions on _LibraryPageStateBase {
     );
   }
 
-  /// 优先用缓存续读；未命中时保留离线阅读与详情页加载入口。
-  ///
-  /// 书旗离线缓存使用独立命名空间；未命中时仍进书旗详情，不进入番茄续读。
+  /// 本地文件、小说插件和其他媒体使用各自的阅读入口。
   Future<void> _open(MediaItem item, {bool importedResume = false}) async {
-    if (isShuqiItem(item)) {
-      if (await _openCached(item) || !mounted) return;
-      if (await openRecentBook(
+    if (item.source == ShelfIdentity.fanqie &&
+        ImportedBookStore.isLocalBookId(item.id)) {
+      await _openLocalBook(item);
+      return;
+    }
+    if (item.kind == 'book') {
+      await openBookDetail(
         context,
         item,
+        entry: BookOpenEntry.shelf,
+        importedResume: importedResume,
         cache: widget.cacheStore,
         readerStore: widget.readerStore,
         directoryLoader: widget.directoryLoader,
-      )) {
-        return;
-      }
-      if (!mounted) return;
-      await openBookDetail(context, item, entry: BookOpenEntry.shelf);
-      return;
-    }
-    if (ImportedBookStore.isLocalBookId(item.id)) {
-      await _openLocalBook(item);
+        connectivity: widget.connectivity,
+      );
       return;
     }
     final preferences = BookOpenPreferences.instance;
@@ -257,8 +254,6 @@ mixin _LibraryPageActions on _LibraryPageStateBase {
         )) {
       return;
     }
-    if (!mounted) return;
-    if (item.source == ShelfIdentity.fanqie && await _openCached(item)) return;
     if (!mounted) return;
     if (importedResume) {
       await Navigator.push(
@@ -313,25 +308,6 @@ mixin _LibraryPageActions on _LibraryPageStateBase {
               store.chapterText(book.id, chapter.itemId),
         ),
       ),
-    );
-  }
-
-  /// 仅无网且来源对应的章节缓存可用时，才抢在联网详情页前面。
-  Future<bool> _openCached(MediaItem item) async {
-    if (item.source != ShelfIdentity.fanqie && !isShuqiItem(item)) return false;
-    final cache = widget.cacheStore ?? ChapterCacheStore.instance;
-    final book = await cachedBookForOfflineOpen(
-      item,
-      cache: cache,
-      connectivity: await (widget.connectivity ?? currentConnectivity)(),
-    );
-    if (book == null || !mounted) return false;
-    return openCachedBook(
-      context,
-      book: book,
-      cache: cache,
-      readerStore: widget.readerStore,
-      shelfItem: item,
     );
   }
 

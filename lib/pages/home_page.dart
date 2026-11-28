@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/home_cell.dart';
 import '../models/search_discovery.dart';
 import '../models/media_item.dart';
+import '../services/novel_plugins.dart';
 import '../services/api_client.dart';
 import '../services/app_log.dart';
 import '../services/app_style_tokens.dart';
@@ -38,6 +39,7 @@ import '../widgets/home/ugc_story_feed.dart';
 import '../widgets/desktop_shell_scope.dart';
 import '../widgets/tab_swipe_area.dart';
 import 'cached_book_reader.dart';
+import 'novel_plugins_page.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
 import 'rank_page.dart';
@@ -204,8 +206,16 @@ class _HomePageState extends ConsumerState<HomePage> {
     unawaited(HomeContinuePreferences.instance.load());
     shellVisibleTab.addListener(_onShellVisibility);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) ref.read(homeProvider.notifier).load();
+      if (mounted && _loadsFeed(ref.read(homeProvider).tabIndex)) {
+        ref.read(homeProvider.notifier).load();
+      }
     });
+  }
+
+  bool _loadsFeed(int index) {
+    final notifier = ref.read(homeProvider.notifier);
+    return !notifier.isPluginBookstore(index) ||
+        notifier.bookstorePlugin?.hasBookstoreFeed == true;
   }
 
   void _onLocalDataChanged() {
@@ -287,7 +297,8 @@ class _HomePageState extends ConsumerState<HomePage> {
 
   void _onScroll() {
     if (!mounted || !_visible) return;
-    if (_isUgcTab(ref.read(homeProvider).tabIndex)) return;
+    final index = ref.read(homeProvider).tabIndex;
+    if (_isUgcTab(index) || !_loadsFeed(index)) return;
     if (!_scroll.hasClients) {
       final state = ref.read(homeProvider);
       if (state.error == null && _visibleItems(state).isEmpty) _maybeLoadMore();
@@ -317,7 +328,9 @@ class _HomePageState extends ConsumerState<HomePage> {
     _loadMoreTimer?.cancel();
     _loadMoreTimer = null;
     // 每个分类有自己的 ScrollController，不需要在这里回顶。
-    ref.read(homeProvider.notifier).selectTab(index);
+    ref
+        .read(homeProvider.notifier)
+        .selectTab(index, loadFeed: _loadsFeed(index));
     _scheduleExternalSync();
   }
 
@@ -549,6 +562,24 @@ class _HomePageState extends ConsumerState<HomePage> {
   Widget _buildTabPage(int target, double gridWidth, double textScale) {
     final palette = HomePalette.of(context);
     final kind = ref.read(homeProvider.notifier).identityOf(target).kind;
+    if (!_loadsFeed(target)) {
+      final installed = ref.read(homeProvider.notifier).bookstorePlugin != null;
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            FilledButton(
+              onPressed: () => openNovelPlugins(context),
+              child: Text(installed ? '更新插件' : '导入插件'),
+            ),
+            TextButton(
+              onPressed: () => openNovelPluginSearch(context),
+              child: const Text('从书源搜索小说'),
+            ),
+          ],
+        ),
+      );
+    }
     if (kind == 'ugc') {
       return ValueListenableBuilder<int?>(
         valueListenable: shellVisibleTab,
@@ -945,13 +976,27 @@ class _HomePageState extends ConsumerState<HomePage> {
     );
   }
 
+  ApiClient? get _discoveryApi {
+    final registry = NovelPluginRegistry.instance;
+    return registry.supportsZipPackages
+        ? registry.fanqieApi
+        : ApiClient.instance;
+  }
+
   /// 官方搜索行右上角的「分类」入口（`alx.xml` `i_y`）。官方点它走
   /// `turnToCategoryTab` → `//category` 路由（`BookCategoryActivity` →
   /// `KmpCategoryFragment`）；这里打开同结构的分类页。
   void _openCategory() {
+    final api = _discoveryApi;
+    if (api == null) {
+      openNovelPlugins(context);
+      return;
+    }
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const CategoryPage()),
+      MaterialPageRoute(
+        builder: (_) => CategoryPage(loader: api.categoryFront),
+      ),
     );
   }
 
@@ -961,9 +1006,17 @@ class _HomePageState extends ConsumerState<HomePage> {
   /// Note: 榜单目录与 rank_id 的来源 — 见
   /// .agents/notes/implemented/feature/2026-09-11-discovery-pages.md
   void _openRanks() {
+    final api = _discoveryApi;
+    if (api == null) {
+      openNovelPlugins(context);
+      return;
+    }
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const RankPage()),
+      MaterialPageRoute(
+        builder: (_) =>
+            RankPage(catalogLoader: api.rankCatalog, pageLoader: api.rankBoard),
+      ),
     );
   }
 
@@ -973,10 +1026,9 @@ class _HomePageState extends ConsumerState<HomePage> {
   /// the same rank endpoint and swaps the preview in place, so the page stays
   /// put. Only the first page is needed — the rail scrolls the rest.
   Future<List<MediaItem>> _loadRankPreview(String rankId, int algo) async {
-    final board = await ApiClient.instance.rankBoard(
-      rankId: rankId,
-      algo: algo,
-    );
+    final api = _discoveryApi;
+    if (api == null) return const [];
+    final board = await api.rankBoard(rankId: rankId, algo: algo);
     return [
       for (final entry in board.entries)
         if (entry.id.isNotEmpty) entry.toMediaItem(),
@@ -988,6 +1040,17 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   Future<void> _resumeItem(MediaItem item) async {
+    if (item.kind == 'book') {
+      await openBookDetail(
+        context,
+        item,
+        entry: BookOpenEntry.shelf,
+        importedResume: true,
+        cache: widget.cacheStore,
+        readerStore: widget.readerStore,
+      );
+      return;
+    }
     if (await openRecentBook(
       context,
       item,

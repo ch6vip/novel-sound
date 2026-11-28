@@ -91,6 +91,27 @@ void main() {
     await cache.close();
   });
 
+  test(
+    'plugin snapshots survive reopening and stay scoped to publisher and channel',
+    () async {
+      HomeFeedCache.hiveReady = true;
+      final cache = HomeFeedCache();
+      await cache.savePlugin('fanqie', 'qa-key', 'novels', [
+        _item('novel-cache', kind: 'book'),
+      ]);
+      await cache.close();
+      await cache.warmUp();
+      expect(
+        cache.loadPlugin('fanqie', 'qa-key', 'novels')!.items.single.id,
+        'novel-cache',
+      );
+      expect(cache.loadPlugin('fanqie', 'qa-key', 'recommended'), isNull);
+      expect(cache.loadPlugin('fanqie', 'other-key', 'novels'), isNull);
+      expect(cache.loadPlugin('shuqi', 'qa-key', 'novels'), isNull);
+      await cache.close();
+    },
+  );
+
   test('cells round trip and old stream layouts fall back', () async {
     HomeFeedCache.hiveReady = true;
     final cache = HomeFeedCache();

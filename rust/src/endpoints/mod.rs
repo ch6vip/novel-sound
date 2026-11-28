@@ -6,6 +6,7 @@
 
 pub mod account_history;
 pub mod account_library;
+
 pub mod audio;
 pub mod audio_text;
 pub mod author;
@@ -20,10 +21,12 @@ pub mod full;
 pub mod full_relay;
 pub mod home;
 pub mod manga;
+mod media_model;
 pub mod reader_video;
 pub mod router;
 pub mod search;
 pub mod session;
+#[cfg(any(not(target_os = "android"), feature = "service"))]
 pub mod shuqi;
 pub mod toutiao;
 pub mod util;
@@ -137,6 +140,8 @@ pub struct RawOut {
 pub type RawHandler = for<'a> fn(&'a Ctx, &'a Params) -> BoxFuture<'a, ApiResult<RawOut>>;
 
 pub struct Server {
+    #[cfg(all(any(windows, target_os = "android"), feature = "app"))]
+    pub(crate) novel_root: Option<std::path::PathBuf>,
     pub ctx: Arc<Ctx>,
     pub(crate) lifetime: tokio_util::sync::CancellationToken,
     routes: HashMap<&'static str, Handler>,
@@ -145,14 +150,20 @@ pub struct Server {
 
 impl Server {
     pub fn new(ctx: Arc<Ctx>) -> Self {
-        let mut s = Server {
+        let mut s = Self::empty(ctx);
+        server::register_all(&mut s);
+        s
+    }
+
+    pub(crate) fn empty(ctx: Arc<Ctx>) -> Self {
+        Self {
+            #[cfg(all(any(windows, target_os = "android"), feature = "app"))]
+            novel_root: None,
             ctx,
             lifetime: tokio_util::sync::CancellationToken::new(),
             routes: HashMap::new(),
             raw: HashMap::new(),
-        };
-        server::register_all(&mut s);
-        s
+        }
     }
 
     pub fn add_route(&mut self, name: &'static str, handler: Handler) {
@@ -178,6 +189,7 @@ pub mod server {
 
     pub fn register_all(s: &mut Server) {
         search::register(s);
+        #[cfg(any(not(target_os = "android"), feature = "service"))]
         shuqi::register(s);
         home::register(s);
         book::register(s);

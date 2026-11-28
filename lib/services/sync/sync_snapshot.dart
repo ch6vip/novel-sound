@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
+
 import '../../models/library_backup.dart';
 import '../../models/shelf_identity.dart';
 import 'sync_document.dart';
@@ -10,7 +11,8 @@ class SyncSnapshot {
   // These snapshots merge the portable Fanqie records. The WebDAV exchange
   // preserves other sources in the shared backup.
   static bool _legacySource(Map<dynamic, dynamic> record) =>
-      record['source'] == null || record['source'] == ShelfIdentity.fanqie;
+      record['novelPlugin'] != true &&
+      (record['source'] == null || record['source'] == ShelfIdentity.fanqie);
 
   factory SyncSnapshot.fromBackup(LibraryBackup backup) {
     final raw = backup.toJson();

@@ -136,8 +136,11 @@ class AudioPage extends StatefulWidget {
   /// 内存实现后，离线命中判断不依赖真实 Hive 箱。
   final AudioDownloadStore? downloadStore;
 
+  final ApiClient? novelApi;
+
   const AudioPage({
     super.key,
+    this.novelApi,
     required this.bookId,
     required this.title,
     required this.chapters,
@@ -231,21 +234,30 @@ typedef _RoutePlayback = ({
 Future<AudioExtras> _defaultAudioExtras(
   String bookId, {
   ValueChanged<AudioToneSet>? onTones,
+  ApiClient? novelApi,
 }) async {
-  final tones = await ApiClient.instance
+  final api = novelApi ?? ApiClient.instance;
+  final tones = await api
       .bookTones(bookId)
       .catchError((Object _) => const AudioToneSet());
   onTones?.call(tones);
-  final related = await ApiClient.instance
+  final related = await api
       .relatedWorks(bookId)
       .catchError((Object _) => const <RelatedWork>[]);
-  final detail = await ApiClient.instance
+  final detail = await api
       .bookDetail(bookId)
       .catchError((Object _) => const BookDetail());
   return AudioExtras(tones: tones, related: related, detail: detail);
 }
 
 class _AudioPageState extends State<AudioPage> {
+  Future<List<Chapter>> _loadReadingDirectory(String bookId) async {
+    final api = widget.novelApi;
+    if (api == null) return loadBookDirectory(bookId);
+    final volumes = await api.directoryChapters(bookId, tab: '小说');
+    return volumes.expand((volume) => volume).toList();
+  }
+
   _AudioPlaybackController? _session;
   _AudioPlaybackScopeState? _owner;
   bool _attaching = false;
@@ -434,7 +446,8 @@ class _AudioPageState extends State<AudioPage> {
       return null;
     }
     try {
-      final content = await ApiClient.instance.chapterContent(itemId);
+      final content = await (widget.novelApi ?? ApiClient.instance)
+          .chapterContent(itemId);
       return content.isEmpty ? null : content;
     } catch (_) {
       return null;
@@ -948,6 +961,7 @@ class _AudioPageState extends State<AudioPage> {
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ReaderPage(
+            novelApi: widget.novelApi,
             bookId: c._bookId,
             title: c._title,
             cover: c._cover,
@@ -1044,7 +1058,7 @@ class _AudioPageState extends State<AudioPage> {
     }
     _openingReadAlong = true;
     try {
-      final chapters = await (widget.directoryLoader ?? loadBookDirectory)(
+      final chapters = await (widget.directoryLoader ?? _loadReadingDirectory)(
         bookId,
       );
       if (!mounted || c._closed) return;
@@ -1058,6 +1072,7 @@ class _AudioPageState extends State<AudioPage> {
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ReaderPage(
+            novelApi: widget.novelApi,
             bookId: bookId,
             title: novel!.title.isEmpty ? c._title : novel.title,
             cover: novel.cover.isEmpty ? c._cover : novel.cover,
@@ -1331,8 +1346,16 @@ class _AudioPageState extends State<AudioPage> {
         book: book,
         currentIndex: c._index,
         cache: cache,
-        loader: (chapter) => ApiClient.instance.contentText(chapter.itemId),
+        loader: (chapter) =>
+            (widget.novelApi ?? ApiClient.instance).contentText(chapter.itemId),
         extraSection: AudioOfflineSection(
+          source: widget.novelApi == null
+              ? null
+              : (bookId, itemId, toneId) => widget.novelApi!.audioSource(
+                  itemId,
+                  bookId: bookId,
+                  toneId: toneId,
+                ),
           bookId: c._bookId,
           title: c._title,
           cover: c._cover,
@@ -1353,7 +1376,7 @@ class _AudioPageState extends State<AudioPage> {
         bookId: c._bookId,
         loader: widget.sourceLoader != null || widget.playerFactory != null
             ? null
-            : ApiClient.instance.bookComments,
+            : (widget.novelApi ?? ApiClient.instance).bookComments,
       ),
     );
   }

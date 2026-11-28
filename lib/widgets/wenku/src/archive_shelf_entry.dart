@@ -128,6 +128,7 @@ final RegExp _episodeCountPattern = RegExp(r'^[0-9]+$');
 String? archiveSourceLabel(MediaItem item, {required bool local}) {
   if (local) return '本地';
   if (item.source == 'shuqi') return '书旗';
+  if (item.kind == 'book' && item.source != 'fanqie') return item.source;
   return switch (item.kind) {
     'video' => '短剧',
     'manju' => '漫剧',

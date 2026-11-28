@@ -119,7 +119,7 @@ class ReaderJoinedScrollState extends State<ReaderJoinedScroll> {
   double _endHeight(JoinedReaderChapter chapter) =>
       ReaderJoinedChapterEnd.height(
         chapter.layout.spec.textScaler,
-        chapter.ideas.isNotEmpty,
+        chapter.ideas.hasChapterComments,
       );
 
   double chapterStart(int index) {

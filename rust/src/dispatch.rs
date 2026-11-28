@@ -194,9 +194,105 @@ pub fn requires_capability(path: &str) -> bool {
     }
 }
 
+#[cfg(all(any(windows, target_os = "android"), feature = "app"))]
+async fn dispatch_novel_zip(server: &Server, req: &Request) -> Option<Response> {
+    let query = Params::parse(&req.query);
+    let path = req.path.as_str();
+    let read_route = router::match_rest_path(path, &query);
+    let (source, plugin_path) = match path {
+        ACCOUNT_HISTORY_PATH => ("fanqie", "/v1/account/history"),
+        ACCOUNT_LIBRARY_PATH => ("fanqie", "/v1/account/library"),
+        "/api/v1/search/fanqie"
+        | "/api/v1/search/suggest"
+        | "/api/v1/search/hot"
+        | "/api/v1/search/cue"
+        | "/api/v1/category" => ("fanqie", path),
+        _ if path.starts_with("/api/v1/rank/") => ("fanqie", path),
+        "/api/v1/search" if query.get("tab_type") == Some("3") => ("fanqie", path),
+        _ if path.starts_with("/api/v1/shuqi/") => ("shuqi", path),
+        _ if read_route.as_ref().is_some_and(|route| {
+            matches!(
+                route.api,
+                "book_detail_legacy"
+                    | "novel_detail"
+                    | "book_share"
+                    | "book_reviews"
+                    | "book_comments_legacy"
+                    | "chapter_summary"
+                    | "reader_video_match"
+                    | "idea_list"
+                    | "author_info"
+                    | "author_bookshelf"
+                    | "related"
+            )
+        }) =>
+        {
+            ("fanqie", path)
+        }
+        _ if read_route
+            .as_ref()
+            .is_some_and(|route| route.api == "content")
+            && !matches!(path, "/api/v1/chapters/batch" | "/api/v1/chapters/full") =>
+        {
+            ("fanqie", path)
+        }
+        _ if read_route
+            .as_ref()
+            .is_some_and(|route| route.api == "directory")
+            && query.get_str("tab").is_empty() =>
+        {
+            ("fanqie", path)
+        }
+        _ => return None,
+    };
+    let root = server.novel_root.clone()?;
+    let query = req.query.clone();
+    let method = req.method.clone();
+    let body = req.body.clone();
+    let plugin_path = if read_route
+        .as_ref()
+        .is_some_and(|route| route.api == "book_detail_legacy")
+        && path.trim_matches('/').split('/').count() == 4
+    {
+        format!("{}/detail", path.trim_end_matches('/'))
+    } else {
+        plugin_path.to_owned()
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        crate::novel_wasm::installed_request(&root, source, &plugin_path, &query, &method, &body)
+    })
+    .await;
+    Some(match result {
+        Ok(Ok((404, bytes)))
+            if path == "/api/v1/search/fanqie"
+                && serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .and_then(|value| value["error"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some("不支持此书源请求") =>
+        {
+            Response::json(
+                503,
+                &json!({"success":false,"error":"请更新番茄 ZIP 后使用此搜索接口"}),
+            )
+        }
+        Ok(Ok((status, bytes))) => Response::text(status, JSON_CT, bytes),
+        Ok(Err(message)) => Response::json(503, &json!({"success": false, "error":message})),
+        Err(_) => Response::json(
+            503,
+            &json!({"success": false, "error":"书源运行环境不可用"}),
+        ),
+    })
+}
+
 pub async fn dispatch(server: &Server, req: &Request) -> Response {
     let path = req.path.as_str();
     let ctx = &server.ctx;
+
+    #[cfg(all(any(windows, target_os = "android"), feature = "app"))]
+    if let Some(response) = dispatch_novel_zip(server, req).await {
+        return response;
+    }
 
     // Account credentials belong in a bounded POST body, never in route/query
     // parameters, endpoint error logs, or the anonymous rotating device pool.

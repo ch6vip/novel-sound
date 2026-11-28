@@ -2,7 +2,6 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fqapp/widgets/search/search_discovery.dart';
 import 'package:fqapp/widgets/search/search_media_tile.dart';
-import 'package:fqapp/widgets/search/search_score_filter.dart';
 import 'package:fqapp/widgets/wenku/wenku_ui.dart';
 
 /// Finders for the Wenku8 search page. Tests keep their behavioural
@@ -13,38 +12,6 @@ Finder searchSegment(String label) => find.descendant(
   of: find.byKey(const Key('search-category-tabs')),
   matching: find.text(label),
 );
-
-/// The rating filter button on the results heading.
-Finder get searchScoreFilter => find.byKey(const Key('search-minimum-score'));
-
-/// Advances the rating filter until it shows [label] ('评分不限', '8 分以上',
-/// '9 分以上'). The control steps through its thresholds on each tap.
-Future<void> selectSearchScore(WidgetTester tester, String label) async {
-  for (var i = 0; i < SearchScoreFilter.thresholds.length; i++) {
-    final current = find.descendant(
-      of: searchScoreFilter,
-      matching: find.text(label),
-    );
-    if (current.evaluate().isNotEmpty) return;
-    await tester.tap(searchScoreFilter);
-    await tester.pumpAndSettle();
-  }
-  throw StateError('Rating filter never showed $label');
-}
-
-/// The rating threshold the filter currently shows, as a number.
-double searchScoreValue(WidgetTester tester) {
-  for (final value in SearchScoreFilter.thresholds) {
-    final label = SearchScoreFilter.labelFor(value);
-    if (find
-        .descendant(of: searchScoreFilter, matching: find.text(label))
-        .evaluate()
-        .isNotEmpty) {
-      return value;
-    }
-  }
-  throw StateError('Rating filter label not found');
-}
 
 /// A rendered result, in either list or grid layout.
 Finder get searchResultTiles => find.byWidgetPredicate(

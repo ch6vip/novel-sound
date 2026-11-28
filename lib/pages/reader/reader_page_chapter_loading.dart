@@ -327,6 +327,7 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
 
   bool _isRemoteFullPilotChapter(Chapter chapter) =>
       widget.chapterLoader == null &&
+      widget.novelApi == null &&
       !widget.localOnly &&
       widget.chapterCache == null &&
       !ImportedBookStore.isLocalBookId(widget.bookId) &&
@@ -490,7 +491,10 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
 
   bool get _usesChapterDiskCache =>
       !ImportedBookStore.isLocalBookId(widget.bookId) &&
-      (!widget.localOnly || widget.bookId.startsWith('shuqi:'));
+      (!widget.localOnly ||
+          widget.readOfflineCache ||
+          widget.bookId.startsWith('shuqi:') ||
+          parseNovelPluginBookId(widget.bookId) != null);
 
   Future<String?> _readChapterDiskCache(Chapter chapter) async {
     if (!_usesChapterDiskCache) return null;
@@ -555,7 +559,9 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
     final loader = widget.chapterLoader;
     final ChapterContent content;
     if (loader == null) {
-      if (widget.bookId.startsWith('shuqi:') ||
+      if (widget.readOfflineCache ||
+          widget.bookId.startsWith('shuqi:') ||
+          parseNovelPluginBookId(widget.bookId) != null ||
           ImportedBookStore.isLocalBookId(widget.bookId)) {
         throw const ApiException('此来源的章节未缓存，请从书籍详情重新打开');
       }
@@ -567,9 +573,10 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
       } else {
         final request = _chapterRequestHandles.start(chapter.itemId);
         try {
-          content = await ApiClient.instance.withCancellation(
+          final api = widget.novelApi ?? ApiClient.instance;
+          content = await api.withCancellation(
             request,
-            () => ApiClient.instance.chapterContent(chapter.itemId),
+            () => api.chapterContent(chapter.itemId),
           );
         } finally {
           _chapterRequestHandles.finish(chapter.itemId, request);
@@ -588,7 +595,8 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
   }
 
   Future<void> _refreshCachedChapter(Chapter chapter) async {
-    if (widget.localOnly || ImportedBookStore.isLocalBookId(widget.bookId)) {
+    if ((widget.localOnly && parseNovelPluginBookId(widget.bookId) == null) ||
+        ImportedBookStore.isLocalBookId(widget.bookId)) {
       return;
     }
     if (_isRemoteFullPilotChapter(chapter)) return;
@@ -614,9 +622,20 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
         return;
       }
       final content = ChapterContent.fromCacheText(text);
-      // This request only refreshes an existing cache, even if its memory
-      // entry was evicted while fetching. Partial content cannot improve it.
-      if (!content.illustrationsChecked) return;
+      if (!content.illustrationsChecked) {
+        final previousText =
+            _chapterCache[chapter.itemId] ??
+            await _readChapterDiskCache(chapter);
+        if (previousText == null ||
+            !identical(
+              content,
+              content.preferCompleteCache(
+                ChapterContent.fromCacheText(previousText),
+              ),
+            )) {
+          return;
+        }
+      }
       var catalogReady = true;
       try {
         await _ensureCatalog();

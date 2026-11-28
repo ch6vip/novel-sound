@@ -120,6 +120,7 @@ class BookCommentPage {
     this.scoreContext = '',
     this.hasMore = false,
     this.nextOffset = 0,
+    this.nextCursor,
   });
 
   final List<BookComment> comments;
@@ -134,6 +135,7 @@ class BookCommentPage {
   final String scoreContext;
   final bool hasMore;
   final int nextOffset;
+  final String? nextCursor;
 
   bool get isEmpty => comments.isEmpty;
 
