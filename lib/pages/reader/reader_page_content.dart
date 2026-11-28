@@ -282,7 +282,7 @@ extension _ReaderPageContent on _ReaderPageState {
                   ),
                 ),
                 const SizedBox(width: 16),
-                if (_ideas.isNotEmpty)
+                if (_ideas.hasChapterComments)
                   OutlinedButton.icon(
                     key: const ValueKey('reader-scroll-chapter-comments'),
                     style: OutlinedButton.styleFrom(
@@ -293,13 +293,13 @@ extension _ReaderPageContent on _ReaderPageState {
                     ),
                     icon: const Icon(LucideIcons.message_square, size: 18),
                     label: Text(
-                      '本章评论 ${_ideas.total}',
+                      '本章评论 ${_ideas.endCount}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 14, height: 1.4),
                     ),
                   ),
-                if (_ideas.isNotEmpty) const SizedBox(width: 16),
+                if (_ideas.hasChapterComments) const SizedBox(width: 16),
                 Expanded(
                   child: OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(

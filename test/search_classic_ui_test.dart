@@ -16,7 +16,6 @@ import 'package:fqapp/widgets/search/classic_search_content_toolbar.dart';
 import 'package:fqapp/widgets/search/classic_search_result_row.dart';
 import 'package:fqapp/widgets/search/classic_search_scope_bar.dart';
 import 'package:fqapp/widgets/search/search_media_tile.dart';
-import 'package:fqapp/widgets/search/search_score_filter.dart';
 import 'package:fqapp/widgets/wenku/book_collection_layout.dart';
 
 import 'support/app_ui_host.dart';
@@ -162,7 +161,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(shuqiCalls, ['测试']);
     expect(find.text('书旗作品'), findsOneWidget);
-    expect(find.text('书旗来源暂不提供评分'), findsOneWidget);
+    expect(find.text('书旗来源暂不提供评分'), findsNothing);
     expect(requests, hasLength(2), reason: '书旗不请求番茄分类');
 
     await tester.tap(find.byKey(const Key('search-source-fanqie')));
@@ -170,46 +169,6 @@ void main() {
     expect(shuqiCalls, ['测试']);
     expect(requests.last, ('测试', 3, 0));
     expect(find.text('3 分类作品'), findsOneWidget);
-  });
-
-  testWidgets('classic rating filter only filters loaded results', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _host(
-        AppThemeStyle.classic,
-        SearchPage(
-          initialQuery: '评分',
-          searchLoader: _loader((query, {required tabType, required offset}) {
-            return [
-              SearchTab(
-                title: '综合',
-                items: [
-                  _item('low', '低分作品', score: 8.2),
-                  _item('high', '高分作品', score: 9.3),
-                ],
-                hasMore: false,
-              ),
-            ];
-          }),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('低分作品'), findsOneWidget);
-    expect(find.text('高分作品'), findsOneWidget);
-
-    await _selectClassicScore(tester, '9 分及以上');
-    expect(find.text('低分作品'), findsNothing);
-    expect(find.text('高分作品'), findsOneWidget);
-    expect(
-      (await SharedPreferences.getInstance()).getDouble('search_minimum_score'),
-      9,
-    );
-
-    await _selectClassicScore(tester, '评分不限');
-    expect(find.text('低分作品'), findsOneWidget);
-    expect(find.text('高分作品'), findsOneWidget);
   });
 
   testWidgets('classic ID lookup keeps the hint and keyword fallback', (
@@ -411,7 +370,7 @@ void main() {
     expect(find.text('热搜词 作品'), findsOneWidget);
   });
 
-  testWidgets('classic category results open the shared detail route', (
+  testWidgets('classic drama results open the shared detail route', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -422,8 +381,8 @@ void main() {
           searchLoader: _loader((query, {required tabType, required offset}) {
             return [
               SearchTab(
-                title: tabType == 3 ? '书籍' : '综合',
-                items: [_item('book', '进入详情')],
+                title: tabType == 11 ? '短剧' : '综合',
+                items: [_item('drama', '进入详情', kind: 'video')],
                 hasMore: false,
               ),
             ];
@@ -433,12 +392,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(searchSegment('小说'));
+    await tester.tap(searchSegment('短剧'));
     await tester.pumpAndSettle();
     expect(find.text('进入详情'), findsOneWidget);
 
     await tester.tap(find.byType(ClassicSearchResultRow).first);
-    // openBookDetail 先等偏好加载完再 push，两个 pump 才保证路由已建好。
     await tester.pump();
     await tester.pump();
     expect(find.byType(DetailPage), findsOneWidget);
@@ -447,7 +405,7 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('classic hot board results open the shared detail route', (
+  testWidgets('classic hot search results open the shared detail route', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -460,7 +418,7 @@ void main() {
             return [
               SearchTab(
                 title: '综合',
-                items: [_item('hot-book', '热搜作品')],
+                items: [_item('hot-drama', '热搜作品', kind: 'video')],
                 hasMore: false,
               ),
             ];
@@ -507,7 +465,7 @@ void main() {
 
     expect(find.byType(BookCollectionView), findsOneWidget);
     expect(find.byType(SearchNovelRow), findsOneWidget);
-    expect(find.byType(SearchScoreFilter), findsOneWidget);
+    expect(find.text('评分不限'), findsNothing);
     expect(find.byType(ClassicSearchScopeBar), findsNothing);
     expect(find.byType(ClassicSearchContentToolbar), findsNothing);
     expect(find.text('档案作品'), findsOneWidget);
@@ -523,13 +481,6 @@ Widget _host(AppThemeStyle style, Widget home) =>
 Widget _hostStore(AppThemeStyleStore store, Widget home) =>
     AppUiHost(store: store, home: home);
 
-Future<void> _selectClassicScore(WidgetTester tester, String label) async {
-  await tester.tap(find.byKey(const Key('search-minimum-score')));
-  await tester.pumpAndSettle();
-  await tester.tap(find.text(label).last);
-  await tester.pumpAndSettle();
-}
-
 SearchPageLoader _loader(
   List<SearchTab> Function(
     String query, {
@@ -541,14 +492,19 @@ SearchPageLoader _loader(
     (query, {required int tabType, required int offset}) async =>
         body(query, tabType: tabType, offset: offset);
 
-MediaItem _item(String id, String title, {double? score}) => MediaItem(
+MediaItem _item(
+  String id,
+  String title, {
+  double? score,
+  String kind = 'book',
+}) => MediaItem(
   id: id,
   title: title,
   cover: '',
   author: '',
   badge: '',
   ep: '',
-  kind: 'book',
+  kind: kind,
   score: score,
 );
 

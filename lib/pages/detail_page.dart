@@ -1,5 +1,6 @@
 import '../widgets/desktop_chapter_sidebar.dart';
 import '../services/desktop_platform.dart';
+
 import 'dart:async';
 
 import 'package:cupertino_ui/cupertino_ui.dart';
@@ -17,6 +18,7 @@ import '../services/api_client.dart';
 import '../services/app_theme_style.dart';
 import '../services/audio_history.dart';
 import '../services/book_open_preferences.dart';
+import '../services/book_updates.dart';
 import '../services/catalogue_order_preferences.dart';
 import '../services/chapter_cache_store.dart';
 import '../services/chapter_download.dart';
@@ -56,6 +58,11 @@ import 'comic_reader_page.dart';
 import 'player_page.dart';
 import 'reader_page.dart';
 import 'shuqi_detail_page.dart';
+import '../models/novel_plugin_book_id.dart';
+import 'novel_plugins_page.dart';
+import '../services/novel_plugins.dart';
+import '../services/reader_bookmark_store.dart';
+import '../services/reader_underline_store.dart';
 import 'ai_reading/settings/ai_book_settings_page.dart';
 
 part 'detail/detail_page_classic.dart';
@@ -98,6 +105,8 @@ Future<_Captured<T>> _capture<T>(Future<T> future) async {
 
 class DetailPage extends StatefulWidget {
   final MediaItem item;
+  final ApiClient? novelApi;
+  final NovelSource? bookSource;
   final Future<Map<String, dynamic>> Function(String bookId, {String tab})?
   detailLoader;
   final Future<List<List<Chapter>>> Function(String bookId, {String tab})?
@@ -123,6 +132,8 @@ class DetailPage extends StatefulWidget {
   const DetailPage({
     super.key,
     required this.item,
+    this.novelApi,
+    this.bookSource,
     this.detailLoader,
     this.directoryLoader,
     this.extrasLoader,
@@ -144,6 +155,8 @@ class DetailPage extends StatefulWidget {
 }
 
 class _DetailPageState extends State<DetailPage> {
+  ApiClient get _api => widget.novelApi ?? ApiClient.instance;
+
   Map<String, dynamic>? _detail;
   BookDetail? _bookDetail;
   SeriesDetail _series = SeriesDetail.empty;
@@ -227,7 +240,50 @@ class _DetailPageState extends State<DetailPage> {
   bool get _isAudio => widget.item.kind == 'audio';
   bool get _isManga => widget.item.kind == 'manga';
   bool get _isBook => widget.item.kind == 'book';
-  String get _contentId => widget.item.seriesId ?? widget.item.id;
+  String get _contentId => widget.bookSource != null
+      ? widget.item.id
+      : widget.item.seriesId ?? widget.item.id;
+  String get _bookKey => widget.bookSource == null
+      ? _contentId
+      : novelBookCacheId(widget.item.source, _contentId);
+
+  NovelSourceCapabilities? get _novelCapabilities =>
+      widget.bookSource?.optional;
+
+  bool _supports(NovelCapability capability) =>
+      widget.bookSource == null ||
+      _novelCapabilities?.supports(capability) == true;
+
+  bool get _offersNovelExtras => _supports(NovelCapability.bookReviews);
+  bool get _canListen =>
+      _isBook &&
+      (widget.bookSource == null || _supports(NovelCapability.audio));
+
+  MediaItem get _displayItem {
+    final detail = widget.bookSource == null ? null : _bookDetail;
+    if (detail == null) return widget.item;
+    return widget.item.copyWith(
+      title: detail.title.isEmpty ? null : detail.title,
+      cover: detail.cover.isEmpty ? null : detail.cover,
+      author: detail.author.name.isEmpty ? null : detail.author.name,
+      intro: detail.abstract.isEmpty ? null : detail.abstract,
+    );
+  }
+
+  Future<List<List<Chapter>>> _loadDirectory() =>
+      widget.bookSource?.volumes(_contentId) ??
+      (widget.directoryLoader ?? _api.directoryChapters)(_contentId, tab: _tab);
+
+  Future<String> _loadChapterText(Chapter chapter) async {
+    final supplied = widget.chapterLoader;
+    if (supplied != null) return supplied(chapter);
+    final source = widget.bookSource;
+    if (source != null) {
+      return (await source.chapter(_contentId, chapter)).toCacheText();
+    }
+    return _api.contentText(chapter.itemId);
+  }
+
   String get _chapterUnit => _isVideo
       ? '集'
       : _isManga
@@ -240,7 +296,10 @@ class _DetailPageState extends State<DetailPage> {
 
   /// Source label on the identity block: the fqapp catalogue is 番茄's, and
   /// short dramas/manju/comics are not "小说".
-  String get _sourceLabel => '番茄${kindLabels[widget.item.kind] ?? '小说'}';
+  String get _sourceLabel => widget.bookSource == null
+      ? '番茄${kindLabels[widget.item.kind] ?? '小说'}'
+      : (NovelPluginRegistry.instance.plugin(widget.item.source)?.name ??
+            widget.item.source);
 
   String get _readLabel => switch (widget.item.kind) {
     'video' || 'manju' => _resumeIndex == null ? '开始观看' : '继续观看',
@@ -269,6 +328,7 @@ class _DetailPageState extends State<DetailPage> {
   /// Opens the author's home; null when the payload carried no author id.
   VoidCallback? get _openAuthorAction {
     final author = _bookDetail?.author;
+    if (!_supports(NovelCapability.author)) return null;
     if (author == null || author.id.isEmpty) return null;
     return () => _openAuthor(author.id, author.name);
   }
@@ -325,7 +385,7 @@ class _DetailPageState extends State<DetailPage> {
     if (active != null) {
       if (!active.value.running) {
         WholeBookDownload.release(active);
-      } else if (active.book.id == _contentId) {
+      } else if (active.book.id == _bookKey) {
         _download = active;
         active.addListener(_onDownloadChanged);
       }
@@ -422,31 +482,30 @@ class _DetailPageState extends State<DetailPage> {
     // not have a legacy book-detail record, but their episode list is still
     // perfectly playable. Start both before awaiting either so the page waits
     // for the slower request, not the sum of both request times.
-    final detailFuture = _capture(
-      offlineVideo
-          ? Future<Map<String, dynamic>>.error(
-              const ApiException('当前离线，详情暂不可用'),
-            )
-          : (widget.detailLoader ?? ApiClient.instance.detail)(
-              _contentId,
-              tab: _tab,
-            ),
-    );
+    final detailFuture = _capture(() async {
+      if (offlineVideo) throw const ApiException('当前离线，详情暂不可用');
+      final source = widget.bookSource;
+      if (source != null) {
+        return (raw: null, book: await source.detail(_contentId));
+      }
+      final raw = await (widget.detailLoader ?? _api.detail)(
+        _contentId,
+        tab: _tab,
+      );
+      return (raw: raw, book: BookDetail.fromPayload(raw));
+    }());
     final directoryFuture = _capture(
       _isVideo
           ? loadVideoCatalogue(
               seriesId: _contentId,
               tab: _tab,
               episodeId: widget.item.episodeId,
-              title: widget.item.title,
+              title: _displayItem.title,
               loader: widget.directoryLoader == null
                   ? null
                   : () => widget.directoryLoader!(_contentId, tab: _tab),
             ).then((episodes) => [episodes])
-          : (widget.directoryLoader ?? ApiClient.instance.directoryChapters)(
-              _contentId,
-              tab: _tab,
-            ),
+          : _loadDirectory(),
     );
     // Reviews and cast are cosmetic: they load alongside and never gate the
     // page. Each keeps its own inline error so a failure is visible and
@@ -463,7 +522,7 @@ class _DetailPageState extends State<DetailPage> {
     final directoryResult = await directoryFuture;
     if (!mounted || generation != _loadGeneration) return;
 
-    final detail = detailResult.value;
+    final detail = detailResult.value?.raw;
     final volumes = directoryResult.value ?? <List<Chapter>>[];
 
     final directoryFailed =
@@ -479,7 +538,7 @@ class _DetailPageState extends State<DetailPage> {
 
     // The rich metadata rides on the same detail response the page already
     // fetches, so no extra request is needed for the masthead.
-    final nextBook = detail == null ? null : BookDetail.fromPayload(detail);
+    final nextBook = detailResult.value?.book;
     final nextSummary = nextBook?.abstract.isNotEmpty == true
         ? nextBook!.abstract
         : extractMediaDescription(detail);
@@ -498,7 +557,7 @@ class _DetailPageState extends State<DetailPage> {
       _volumes = detailArchiveVolumes(_allChapters);
       _expandResumeVolume();
       _cachedBook = cached;
-      _detailError = detail == null && detailResult.error != null
+      _detailError = nextBook == null && detailResult.error != null
           ? userFacingError(detailResult.error!)
           : null;
       _directoryError = directoryFailed
@@ -555,12 +614,7 @@ class _DetailPageState extends State<DetailPage> {
     final pageGeneration = _loadGeneration;
     final retryGeneration = ++_directoryRetryGeneration;
     setState(() => _directoryRetrying = true);
-    final result = await _capture(
-      (widget.directoryLoader ?? ApiClient.instance.directoryChapters)(
-        _contentId,
-        tab: _tab,
-      ),
-    );
+    final result = await _capture(_loadDirectory());
     if (!mounted ||
         pageGeneration != _loadGeneration ||
         retryGeneration != _directoryRetryGeneration) {
@@ -591,38 +645,49 @@ class _DetailPageState extends State<DetailPage> {
   /// the network behind its back; such callers inject [DetailExtrasLoader] when
   /// they want the review block exercised.
   Future<DetailExtras> _loadExtras(String bookId) {
+    if (!_offersNovelExtras) return Future.value(const DetailExtras());
     final loader = widget.extrasLoader;
     if (loader != null) return loader(bookId);
     if (widget.detailLoader != null || widget.directoryLoader != null) {
       return Future.value(const DetailExtras());
     }
-    return _defaultExtras(bookId);
+    final capability = _novelCapabilities;
+    if (capability == null) return _defaultExtras(bookId);
+    return capability
+        .bookReviews(bookId)
+        .then((comments) => DetailExtras(comments: comments));
   }
 
   /// Reply fetching is opt-in for the same reason as [_loadExtras]: a caller
   /// that injected its own loaders is offline, so the review list must not
   /// reach for the network when a row is tapped.
   ReviewReplyLoader? _replyLoader(String bookId) {
+    if (!_supports(NovelCapability.commentReplies)) return null;
     if (widget.detailLoader != null || widget.directoryLoader != null) {
       return null;
     }
     if (bookId.isEmpty) return null;
-    return (commentId) =>
-        ApiClient.instance.commentReplies(bookId, commentId, groupId: bookId);
+    final capability = _novelCapabilities;
+    return (commentId) => capability == null
+        ? _api.commentReplies(bookId, commentId, groupId: bookId)
+        : capability.commentReplies(bookId, commentId);
   }
 
   /// Offset-based review paging, under the same offline rule as
   /// [_replyLoader]: injected-loader callers drive their own data, and the
   /// 「全部书评」 affordance stays hidden for them.
   Future<BookCommentPage> Function(int offset)? _commentsLoader() {
+    if (!_offersNovelExtras) return null;
     if (widget.detailLoader != null ||
         widget.directoryLoader != null ||
         widget.extrasLoader != null) {
       return null;
     }
     if (_contentId.isEmpty) return null;
-    return (offset) =>
-        ApiClient.instance.bookComments(_contentId, offset: offset);
+    final capability = _novelCapabilities;
+    return (offset) => capability == null
+        ? _api.bookComments(_contentId, offset: offset)
+        : capability.bookReviews(_contentId, offset: offset);
   }
 
   /// Appends the next review page. A failure keeps the loaded list and just
@@ -741,13 +806,13 @@ class _DetailPageState extends State<DetailPage> {
               MaterialPageRoute(
                 builder: (_) => AiBookSettingsPage(
                   bookId: _contentId,
-                  title: widget.item.title,
+                  title: _displayItem.title,
                   chapters: _allChapters,
                 ),
               ),
             ),
           ),
-        if (_isBook)
+        if (_canListen)
           GlassIconButton(
             key: const Key('detail_action_听书'),
             icon: CupertinoIcons.headphones,
@@ -906,7 +971,7 @@ class _DetailPageState extends State<DetailPage> {
         KeyedSubtree(
           key: contentAnchorKey('hero'),
           child: DetailArchiveIdentity(
-            item: widget.item,
+            item: _displayItem,
             detail: _bookDetail,
             onOpenAuthor: _openAuthorAction,
             lastChapterTitle: _latestChapterTitle,
@@ -1129,7 +1194,7 @@ class _DetailPageState extends State<DetailPage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           DetailHero(
-            item: widget.item,
+            item: _displayItem,
             detail: _bookDetail,
             onOpenAuthor: _openAuthorAction,
             lastChapterTitle: _latestChapterTitle,
@@ -1255,8 +1320,10 @@ class _DetailPageState extends State<DetailPage> {
             const SizedBox(height: 8),
             Row(
               children: [
-                Expanded(child: _desktopWorkspaceListenButton(palette)),
-                const SizedBox(width: 8),
+                if (_canListen) ...[
+                  Expanded(child: _desktopWorkspaceListenButton(palette)),
+                  const SizedBox(width: 8),
+                ],
                 Expanded(child: _desktopWorkspaceDownloadButton(palette)),
               ],
             ),
@@ -1270,8 +1337,10 @@ class _DetailPageState extends State<DetailPage> {
         SizedBox(width: 204, child: primary),
         if (_isBook) ...[
           const SizedBox(width: 8),
-          _desktopWorkspaceListenButton(palette),
-          const SizedBox(width: 8),
+          if (_canListen) ...[
+            _desktopWorkspaceListenButton(palette),
+            const SizedBox(width: 8),
+          ],
           _desktopWorkspaceDownloadButton(palette),
         ],
       ],
@@ -1371,7 +1440,7 @@ class _DetailPageState extends State<DetailPage> {
                 flush: true,
               ),
             )
-          else ...[
+          else if (_offersNovelExtras) ...[
             _desktopWorkspaceHeading(
               palette,
               title: '读者书评',
@@ -1510,7 +1579,7 @@ class _DetailPageState extends State<DetailPage> {
             ),
             const SizedBox(height: 4),
             DetailHero(
-              item: widget.item,
+              item: _displayItem,
               detail: _bookDetail,
               onOpenAuthor: _openAuthorAction,
               lastChapterTitle: _latestChapterTitle,
@@ -1538,21 +1607,22 @@ class _DetailPageState extends State<DetailPage> {
               const SizedBox(height: 8),
               Row(
                 children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      key: const Key('detail_listen_button_desktop'),
-                      onPressed: _loading || _allChapters.isEmpty
-                          ? null
-                          : _openListening,
-                      style: detailOutlineButtonStyle(
-                        palette,
-                        minimumSize: const Size.fromHeight(44),
+                  if (_canListen)
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        key: const Key('detail_listen_button_desktop'),
+                        onPressed: _loading || _allChapters.isEmpty
+                            ? null
+                            : _openListening,
+                        style: detailOutlineButtonStyle(
+                          palette,
+                          minimumSize: const Size.fromHeight(44),
+                        ),
+                        icon: const Icon(LucideIcons.headphones, size: 16),
+                        label: const Text('听书'),
                       ),
-                      icon: const Icon(LucideIcons.headphones, size: 16),
-                      label: const Text('听书'),
                     ),
-                  ),
-                  const SizedBox(width: 8),
+                  if (_canListen) const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton.icon(
                       key: const Key('detail_download_button_desktop'),
@@ -1868,7 +1938,7 @@ class _DetailPageState extends State<DetailPage> {
   ];
 
   Widget _desktopSectionTabs(HomePalette palette) {
-    const labels = ['简介', '目录', '评论'];
+    final labels = ['简介', '目录', if (_offersNovelExtras) '评论'];
     return Row(
       children: [
         for (var i = 0; i < labels.length; i++)
@@ -1984,7 +2054,14 @@ class _DetailPageState extends State<DetailPage> {
   /// Opens the author's home. The author id is required; the row hides the
   /// affordance when the payload carried none.
   Future<void> _openAuthor(String authorId, String name) async {
-    await _push(AuthorPage(authorId: authorId, fallbackName: name));
+    await _push(
+      AuthorPage(
+        authorId: authorId,
+        fallbackName: name,
+        loader: _novelCapabilities?.author ?? widget.novelApi?.authorProfile,
+        sourceId: widget.bookSource == null ? null : widget.item.source,
+      ),
+    );
   }
 
   Future<void> _openDirectory() async {
@@ -2015,16 +2092,19 @@ class _DetailPageState extends State<DetailPage> {
   /// Opens the listening page for the same work, starting where the saved
   /// audio progress left off.
   Future<void> _openListening() async {
-    if (_allChapters.isEmpty || _opening) return;
+    if (!_canListen || _allChapters.isEmpty || _opening) return;
     final generation = ++_openGeneration;
     setState(() => _opening = true);
     try {
       // Listening progress lives in the audio scope, even when the entry
       // being browsed is the text edition of the same book.
       final store = widget.readerStore ?? LibraryStore.instance;
+      final audio = _novelCapabilities?.audioSession(_contentId, _allChapters);
+      final audioBook = audio?.bookId ?? _contentId;
+      final audioChapters = audio?.chapters ?? _allChapters;
       Map<String, dynamic>? saved;
       try {
-        saved = await AudioHistory(store).load(_contentId);
+        saved = await AudioHistory(store).load(audioBook);
       } catch (_) {
         // History is optional. Its absence must not block opening a book.
         saved = null;
@@ -2032,14 +2112,15 @@ class _DetailPageState extends State<DetailPage> {
       if (!mounted || generation != _openGeneration || _allChapters.isEmpty) {
         return;
       }
-      final index = resumeAudioChapterIndex(saved, _allChapters) ?? 0;
+      final index = resumeAudioChapterIndex(saved, audioChapters) ?? 0;
       await _push(
         AudioPage(
-          bookId: _contentId,
-          title: widget.item.title,
-          cover: widget.item.cover,
+          novelApi: audio?.api ?? widget.novelApi,
+          bookId: audioBook,
+          title: _displayItem.title,
+          cover: _displayItem.cover,
           historyStore: widget.readerStore,
-          chapters: _allChapters,
+          chapters: audioChapters,
           startIndex: index,
         ),
       );
@@ -2079,7 +2160,7 @@ class _DetailPageState extends State<DetailPage> {
   /// the reading position. [ChapterDownload] reuses cached bodies in the rest
   /// of the batch, so resuming a download does not re-fetch them.
   Future<void> _startWholeBookDownload(ChapterCache cache) async {
-    final cached = await cache.cachedChapterIds(_contentId);
+    final cached = await cache.cachedChapterIds(_bookKey);
     if (!mounted) return;
     var startIndex = -1;
     for (var i = 0; i < _allChapters.length; i++) {
@@ -2097,14 +2178,12 @@ class _DetailPageState extends State<DetailPage> {
       WholeBookDownload.start(
         cache: cache,
         book: CachedBook(
-          id: _contentId,
-          title: widget.item.title,
-          cover: widget.item.cover,
+          id: _bookKey,
+          title: _displayItem.title,
+          cover: _displayItem.cover,
           chapters: _allChapters,
         ),
-        loader:
-            widget.chapterLoader ??
-            (chapter) => ApiClient.instance.contentText(chapter.itemId),
+        loader: _loadChapterText,
         startIndex: startIndex,
         count: count,
       ),
@@ -2207,7 +2286,7 @@ class _DetailPageState extends State<DetailPage> {
         'manga' => await ReaderHistory(
           scopedHistoryStore(store, 'manga'),
         ).load(_contentId),
-        _ => await ReaderHistory(store).load(_contentId),
+        _ => await ReaderHistory(store).load(_bookKey),
       };
       if (saved?['kind'] != null &&
           saved?['kind'] != widget.item.kind &&
@@ -2280,7 +2359,7 @@ class _DetailPageState extends State<DetailPage> {
             : ChapterCacheStore.instance);
     if (cache == null) return;
     try {
-      final ids = await cache.cachedChapterIds(_contentId);
+      final ids = await cache.cachedChapterIds(_bookKey);
       if (!mounted || generation != _loadGeneration) return;
       setState(() => _cachedChapterIds = ids);
     } catch (_) {
@@ -2383,8 +2462,8 @@ class _DetailPageState extends State<DetailPage> {
       'video' || 'manju' => PlayerPage(
         bookId: _contentId,
         kind: widget.item.kind,
-        title: widget.item.title,
-        cover: widget.item.cover,
+        title: _displayItem.title,
+        cover: _displayItem.cover,
         historyStore: widget.readerStore,
         eps: _allChapters,
         startIndex: startIndex,
@@ -2395,8 +2474,8 @@ class _DetailPageState extends State<DetailPage> {
       ),
       'audio' => AudioPage(
         bookId: _contentId,
-        title: widget.item.title,
-        cover: widget.item.cover,
+        title: _displayItem.title,
+        cover: _displayItem.cover,
         historyStore: widget.readerStore,
         chapters: _allChapters,
         startIndex: startIndex,
@@ -2404,8 +2483,8 @@ class _DetailPageState extends State<DetailPage> {
       ),
       'manga' => ComicReaderPage(
         bookId: _contentId,
-        title: widget.item.title,
-        cover: widget.item.cover,
+        title: _displayItem.title,
+        cover: _displayItem.cover,
         readerStore: widget.readerStore,
         chapters: _allChapters,
         startIndex: startIndex,
@@ -2413,11 +2492,18 @@ class _DetailPageState extends State<DetailPage> {
         shelfItem: widget.item,
       ),
       _ => ReaderPage(
+        novelApi: widget.novelApi,
+        novelCapabilities: _novelCapabilities,
+        sourceBookId: widget.bookSource == null ? null : _contentId,
         bookDetail: _bookDetail,
-        bookId: _contentId,
-        title: widget.item.title,
-        cover: widget.item.cover,
+        bookId: _bookKey,
+        title: _displayItem.title,
+        cover: _displayItem.cover,
         readerStore: widget.readerStore,
+        chapterLoader: widget.bookSource == null
+            ? widget.chapterLoader
+            : _loadChapterText,
+        readOfflineCache: widget.bookSource != null,
         chapters: _allChapters,
         startIndex: startIndex,
         shelfItem: widget.item,
@@ -2449,7 +2535,7 @@ class _DetailPageState extends State<DetailPage> {
   Future<CachedBook?> _cachedCatalogue() async {
     try {
       return await (widget.chapterCache ?? ChapterCacheStore.instance)
-          .cachedBook(_contentId);
+          .cachedBook(_bookKey);
     } catch (_) {
       return null;
     }
@@ -2476,6 +2562,7 @@ class _DetailPageState extends State<DetailPage> {
       book: book,
       cache: widget.chapterCache,
       readerStore: widget.readerStore,
+      shelfItem: widget.item,
     );
     if (!opened && mounted) {
       ScaffoldMessenger.of(
@@ -2496,31 +2583,117 @@ Future<void> openBookDetail(
   BuildContext context,
   MediaItem item, {
   BookOpenEntry entry = BookOpenEntry.discover,
+  bool allowAutoOpen = true,
+  bool importedResume = false,
+  ChapterCache? cache,
+  ReaderStore? readerStore,
+  BookDirectoryLoader? directoryLoader,
+  Future<ConnectivityView> Function()? connectivity,
 }) async {
-  // 书旗条目走自己的详情页：它的 bookId 是另一套命名空间，番茄的 DetailPage
-  // 会拿这个 id 去查番茄接口，必然查不到。
-  if (isShuqiItem(item)) {
-    await Navigator.push(
+  final preferences = BookOpenPreferences.instance;
+  await preferences.load();
+  if (!context.mounted) return;
+  final direct =
+      allowAutoOpen && (importedResume || preferences.directReaderFor(entry));
+  final registry = NovelPluginRegistry.instance;
+  final supportsZip = registry.supportsZipPackages;
+  final isBook = item.kind == 'book';
+  final isLegacyShuqi = !supportsZip && isShuqiItem(item);
+
+  if (isBook &&
+      (direct && item.source == 'fanqie' || isLegacyShuqi && allowAutoOpen) &&
+      await openRecentBook(
+        context,
+        item,
+        cache: cache,
+        readerStore: readerStore,
+        directoryLoader: directoryLoader,
+        novelApi: supportsZip ? registry.fanqieApi : null,
+      )) {
+    return;
+  }
+  if (!context.mounted) return;
+  if (isLegacyShuqi) {
+    await Navigator.push<void>(
       context,
-      MaterialPageRoute<void>(
+      MaterialPageRoute(
         builder: (_) => ShuqiDetailPage(
           bookId: item.id,
           initialTitle: item.title,
           initialCover: item.cover,
+          readerStore: readerStore,
         ),
       ),
     );
     return;
   }
-  final preferences = BookOpenPreferences.instance;
-  await preferences.load();
+
+  NovelSource? bookSource;
+  ApiClient? novelApi;
+  if (isBook && supportsZip) {
+    try {
+      await registry.load();
+    } catch (_) {
+      // A missing runtime still leaves saved chapters readable.
+    }
+    if (!context.mounted) return;
+    final package = registry.plugin(item.source);
+    bookSource = package == null ? null : registry.source(item.source);
+    novelApi = bookSource?.fullApi;
+    final store = cache ?? ChapterCacheStore.instance;
+    if (item.source == 'fanqie') {
+      try {
+        await Future.wait([
+          if (store is ChapterCacheStore) store.mergeFanqiePluginCache(item.id),
+          ReaderBookmarkStore.instance.mergeFanqiePluginBookmarks(item.id),
+          ReaderUnderlineStore.instance.mergeFanqiePluginUnderlines(item.id),
+        ]);
+      } catch (_) {
+        // Local storage errors must leave the online route available.
+      }
+      if (!context.mounted) return;
+    }
+
+    if (allowAutoOpen &&
+        (package == null ||
+            !(await (connectivity ?? currentConnectivity)()).online)) {
+      CachedBook? cached;
+      try {
+        cached = await store.cachedBook(novelBookCacheId(item.source, item.id));
+      } catch (_) {
+        // A cache failure still leaves import and online detail available.
+      }
+      if (!context.mounted) return;
+      if (cached != null &&
+          await openCachedBook(
+            context,
+            book: cached,
+            cache: cache,
+            readerStore: readerStore,
+            shelfItem: item,
+          )) {
+        return;
+      }
+    }
+    if (!context.mounted) return;
+    if (bookSource == null ||
+        !identical(package, registry.plugin(item.source))) {
+      await openNovelPlugins(context);
+      return;
+    }
+  }
   if (!context.mounted) return;
   await Navigator.push(
     context,
     MaterialPageRoute<void>(
       builder: (_) => DetailPage(
         item: item,
-        autoOpenReader: preferences.directReaderFor(entry),
+        novelApi: novelApi,
+        bookSource: bookSource,
+        readerStore: readerStore,
+        chapterCache: cache,
+        connectivity: connectivity,
+        autoOpenReader: direct,
       ),
     ),
   );

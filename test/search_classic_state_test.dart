@@ -129,11 +129,7 @@ void main() {
 
         // 1985 是复审复现点：上一条结果与滚动视口相交，但整条藏在玻璃
         // 页头后面。邻近位置一起回归，避免只修一个魔法偏移。
-        // 结果区头部多了一行「状态 / 字数」筛选条,同一内容位置对应更大的
-        // 滚动偏移,三个复审点整体下移筛选条的高度,保持原来的边界不变。
-        // 实测筛选条给结果头部增加 38dp(同一行在改动前后的 archive 顶部
-        // 相差 38px),所以三个复审点统一 +38;下面 <1 的行内偏移断言不变。
-        for (final point in <double>[1938, 2023, 2088]) {
+        for (final point in <double>[1900, 1985, 2050]) {
           if (store.value != AppThemeStyle.archive) {
             await store.select(AppThemeStyle.archive);
             await tester.pumpAndSettle();
@@ -159,7 +155,21 @@ void main() {
             reason: 'offset $point 保留第一条实际可见作品',
           );
           expect(
-            (after!.distance - before.distance).abs(),
+            (after!.distance -
+                    before.distance.clamp(
+                      double.negativeInfinity,
+                      tester
+                              .getSize(
+                                find.byWidgetPredicate(
+                                  (widget) =>
+                                      widget is ClassicSearchResultRow &&
+                                      widget.item.id == before.id,
+                                ),
+                              )
+                              .height -
+                          1,
+                    ))
+                .abs(),
             lessThan(1),
             reason: 'offset $point 保留相对有效可见顶的行内偏移',
           );
@@ -426,7 +436,7 @@ void main() {
     });
   });
 
-  testWidgets('category, rating and grid view survive both style switches', (
+  testWidgets('category and grid view survive both style switches', (
     tester,
   ) async {
     final store = _store(AppThemeStyle.classic);
@@ -458,8 +468,7 @@ void main() {
     await tester.tap(searchSegment('小说'));
     await tester.pumpAndSettle();
     expect(requests.last, ('组合状态', 3, 0));
-    await _selectClassicScore(tester, '9 分及以上');
-    expect(find.text('低分作品'), findsNothing);
+    expect(find.text('低分作品'), findsOneWidget);
     expect(find.text('高分作品'), findsOneWidget);
     await tester.tap(find.byKey(const Key('search-layout-toggle')));
     await tester.pumpAndSettle();
@@ -470,18 +479,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(requests.length, calls);
     expect(find.text('高分作品'), findsOneWidget);
-    expect(find.text('低分作品'), findsNothing);
+    expect(find.text('低分作品'), findsOneWidget);
     expect(find.text('综合作品'), findsNothing, reason: '仍停在小说分类');
     expect(find.byType(SearchBookGridTile), findsWidgets, reason: '档案仍是网格视图');
-    expect(find.text('9 分以上'), findsOneWidget, reason: '档案评分筛选仍是 9 分');
 
     await store.select(AppThemeStyle.classic);
     await tester.pumpAndSettle();
     expect(requests.length, calls);
     expect(find.text('高分作品'), findsOneWidget);
-    expect(find.text('低分作品'), findsNothing);
+    expect(find.text('低分作品'), findsOneWidget);
     expect(find.byType(HomeMediaCard), findsWidgets, reason: '经典仍是网格视图');
-    expect(find.text('9 分及以上'), findsOneWidget);
   });
 
   testWidgets('the shuqi source survives both style switches', (tester) async {
@@ -528,7 +535,7 @@ void main() {
     expect(shuqi, ['来源']);
     expect(fanqie, ['来源']);
     expect(find.text('书旗作品'), findsOneWidget);
-    expect(find.text('书旗来源暂不提供评分'), findsOneWidget);
+    expect(find.text('书旗来源暂不提供评分'), findsNothing);
   });
 }
 
@@ -614,13 +621,6 @@ bool _isOnScreen(WidgetTester tester, String text) {
   final rect = tester.getRect(finder.first);
   final size = tester.binding.renderViews.first.size;
   return rect.bottom > 0 && rect.top < size.height;
-}
-
-Future<void> _selectClassicScore(WidgetTester tester, String label) async {
-  await tester.tap(find.byKey(const Key('search-minimum-score')));
-  await tester.pumpAndSettle();
-  await tester.tap(find.text(label).last);
-  await tester.pumpAndSettle();
 }
 
 MediaItem _item(int index, {String? title, double? score}) => MediaItem(

@@ -285,6 +285,23 @@ void main() {
     expect(await store.cachedChapterIds('a'), {'1', '2', '3', '4', '5', '6'});
   });
 
+  test(
+    'Fanqie cache merges the old plugin key and keeps pinned downloads',
+    () async {
+      const legacy = 'plugin:fanqie:123';
+      final store = ChapterCacheStore(keys: keys, maxEntries: 1);
+      await _write(store, legacy, 'a', '旧插件下载', pinned: true);
+      await _write(store, '123', 'a', '最新正文');
+      await _write(store, '123', 'b', '旧版下载', pinned: true);
+      await store.mergeFanqiePluginCache('123');
+      await store.mergeFanqiePluginCache('123');
+      await _write(store, 'other', 'c', '阅读缓存');
+      expect(await store.cachedChapterIds('123'), {'a', 'b'});
+      expect(await store.read(bookId: '123', chapterId: 'a'), '最新正文');
+      expect(await store.cachedBook(legacy), isNull);
+    },
+  );
+
   test('pinned downloads do not spend the automatic budget', () async {
     final store = ChapterCacheStore(keys: keys, maxEntries: 2);
     for (final id in ['p1', 'p2', 'p3']) {

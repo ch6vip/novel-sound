@@ -38,6 +38,7 @@ import '../services/native_player.dart';
 import '../services/player_layout_preferences.dart';
 import '../services/player_preferences.dart';
 import '../services/book_open_preferences.dart';
+import 'novel_plugins_page.dart';
 import '../services/boss_key_preferences.dart';
 import '../services/drama_mute_preferences.dart';
 import '../services/haptic_preferences.dart';
@@ -107,6 +108,13 @@ class _SettingsPageState extends State<SettingsPage> {
         ? bossKeyPrefs.shortcut.value.formatLabel()
         : '已关闭';
     final categories = <SettingsCategory>[
+      SettingsCategory(
+        icon: Icons.extension_outlined,
+        title: '书源插件',
+        subtitle: '导入、更新和卸载小说书源',
+        pageBuilder: (_) => const NovelPluginsPage(),
+        items: const [],
+      ),
       SettingsCategory(
         icon: SettingsCategoryIcons.appearance,
         title: '外观',

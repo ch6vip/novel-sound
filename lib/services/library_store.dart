@@ -5,6 +5,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/shelf_identity.dart';
+import '../models/novel_plugin_book_id.dart';
 import '../models/shuqi_book.dart';
 import 'encrypted_hive.dart';
 import 'reader_bookmark_store.dart';
@@ -448,7 +449,10 @@ class LibraryStore implements ReaderStore {
         final contentId = (entry['contentId'] ?? entry['id']).toString();
         final source = historySource(entry);
         final identity = (source, kind, contentId);
-        final key = historyStorageKeyFor(contentId, kind, source: source);
+        final plugin = entry['novelPlugin'] == true;
+        final key = plugin
+            ? novelPluginBookId(source, contentId)
+            : historyStorageKeyFor(contentId, kind, source: source);
         // Bare video/book keys may also be occupied by another kind. Do not
         // overwrite it or invoke legacy statistics migration during restore.
         if (identities.contains(identity) || _histBox.containsKey(key)) {
@@ -459,7 +463,7 @@ class LibraryStore implements ReaderStore {
           'id': key,
           'source': source,
           if (key != contentId) 'contentId': contentId,
-          if (source == shuqiSourceId && kind == 'book')
+          if (plugin || (source == shuqiSourceId && kind == 'book'))
             if (entry['bookId'] != null) 'bookId': key,
         });
         identities.add(identity);

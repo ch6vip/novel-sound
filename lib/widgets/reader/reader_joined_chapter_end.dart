@@ -29,13 +29,13 @@ class ReaderJoinedChapterEnd extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     mainAxisAlignment: MainAxisAlignment.center,
     children: [
-      if (ideas.isNotEmpty)
+      if (ideas.hasChapterComments)
         TextButton.icon(
           key: ValueKey('reader-joined-chapter-comments-$index'),
           onPressed: onComments,
           icon: const Icon(LucideIcons.message_square, size: 18),
           label: Text(
-            '本章评论 ${ideas.total}',
+            '本章评论 ${ideas.endCount}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 14, height: 1.4),

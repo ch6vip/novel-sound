@@ -58,6 +58,18 @@ Future<void> shutdown() => RustLib.instance.api.crateApiShutdown();
 /// from the Kotlin/JNI bridge) was never reachable: a failed start travels back
 /// through `init_android`'s `Result`, so `status()` only ever observes a live
 /// core or none at all.
+Future<Uint8List> novelZipOperate({
+  required String supportDir,
+  required String action,
+  required String arguments,
+  required List<int> archive,
+}) => RustLib.instance.api.crateApiNovelZipOperate(
+  supportDir: supportDir,
+  action: action,
+  arguments: arguments,
+  archive: archive,
+);
+
 Future<String> status() => RustLib.instance.api.crateApiStatus();
 
 /// Base URL of the loopback adapter, for resource URLs (`absoluteUrl`).

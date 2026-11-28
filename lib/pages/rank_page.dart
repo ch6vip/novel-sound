@@ -41,12 +41,14 @@ class RankPage extends StatefulWidget {
   final RankCatalogLoader? catalogLoader;
   final RankPageLoader? pageLoader;
   final RankCache? rankCache;
+  final String? sourceId;
 
   const RankPage({
     super.key,
     this.catalogLoader,
     this.pageLoader,
     this.rankCache,
+    this.sourceId,
   });
 
   @override
@@ -68,7 +70,8 @@ class _RankPageState extends State<RankPage> {
   int _categoryIndex = 0;
   int _generation = 0;
 
-  RankCache get _cache => widget.rankCache ?? RankCache.instance;
+  RankCache? get _cache =>
+      widget.rankCache ?? (widget.sourceId == null ? RankCache.instance : null);
 
   RankTab? get _rank =>
       _rankIndex < _catalog.tabs.length ? _catalog.tabs[_rankIndex] : null;
@@ -99,7 +102,7 @@ class _RankPageState extends State<RankPage> {
     if (catalog.isEmpty) {
       // A failed refresh falls back to the stored catalogue instead of an
       // error page; the board below keeps its own cached content too.
-      final snapshot = _cache.loadCatalog();
+      final snapshot = _cache?.loadCatalog();
       if (snapshot == null) {
         setState(() {
           _loading = false;
@@ -109,7 +112,7 @@ class _RankPageState extends State<RankPage> {
       }
       catalog = snapshot.catalog;
     } else {
-      unawaited(_cache.saveCatalog(catalog));
+      unawaited(_cache?.saveCatalog(catalog));
     }
     setState(() => _catalog = catalog);
     await _loadFirst(generation);
@@ -149,7 +152,7 @@ class _RankPageState extends State<RankPage> {
     // (fresh ones skip the network entirely), the refresh replaces it.
     final snapshot = rank == null
         ? null
-        : _cache.loadBoard(
+        : _cache?.loadBoard(
             rankId: _catalog.rankId,
             algo: rank.algo,
             categoryId: _category?.id ?? 0,
@@ -186,7 +189,7 @@ class _RankPageState extends State<RankPage> {
         _error = null;
       });
       unawaited(
-        _cache.saveBoard(
+        _cache?.saveBoard(
           rankId: _catalog.rankId,
           algo: rank?.algo ?? 0,
           categoryId: _category?.id ?? 0,
@@ -445,7 +448,10 @@ class _RankPageState extends State<RankPage> {
 
   void _openEntry(RankEntry entry) {
     if (entry.id.isEmpty) return;
-    openBookDetail(context, entry.toMediaItem());
+    openBookDetail(
+      context,
+      entry.toMediaItem().copyWith(source: widget.sourceId),
+    );
   }
 }
 

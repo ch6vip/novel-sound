@@ -20,11 +20,17 @@ class HomeMasthead extends StatelessWidget {
   static const double actionSize = 36;
 
   final VoidCallback onSearch;
+  final Widget? leading;
 
   /// 分类入口。null 时不占位。
   final VoidCallback? onCategory;
 
-  const HomeMasthead({super.key, required this.onSearch, this.onCategory});
+  const HomeMasthead({
+    super.key,
+    required this.onSearch,
+    this.onCategory,
+    this.leading,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -57,6 +63,10 @@ class HomeMasthead extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
+          if (leading case final selector?) ...[
+            selector,
+            const SizedBox(width: 8),
+          ],
           _HeaderAction(
             key: const Key('home_search_button'),
             icon: LucideIcons.search,

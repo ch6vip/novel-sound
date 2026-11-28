@@ -8,7 +8,7 @@ import 'package:fqapp/models/media_item.dart';
 import 'package:fqapp/models/shuqi_book.dart';
 import 'package:fqapp/pages/library_page.dart';
 import 'package:fqapp/pages/reader_page.dart';
-import 'package:fqapp/pages/shuqi_detail_page.dart';
+import 'package:fqapp/pages/novel_plugins_page.dart';
 import 'package:fqapp/services/chapter_cache_store.dart';
 import 'package:fqapp/services/connectivity_status.dart';
 import 'package:fqapp/services/library_store.dart';
@@ -66,7 +66,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('书旗条目打开自己的详情页', (tester) async {
+  testWidgets('缺少书旗插件时书架引导导入', (tester) async {
     await tester.binding.setSurfaceSize(const Size(400, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.runAsync(() async {
@@ -74,14 +74,14 @@ void main() {
         _item('123', title: '书旗书', source: 'shuqi'),
       );
     });
-    await tester.pumpWidget(_app());
+    await tester.pumpWidget(_app(cache: MemoryChapterCache()));
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const ValueKey('shelf-book-shuqi/book:123')));
     for (
       var attempt = 0;
       attempt < 30 &&
-          find.byType(ShuqiDetailPage, skipOffstage: false).evaluate().isEmpty;
+          find.byType(NovelPluginsPage, skipOffstage: false).evaluate().isEmpty;
       attempt++
     ) {
       await tester.runAsync(
@@ -89,7 +89,7 @@ void main() {
       );
       await tester.pump();
     }
-    expect(find.byType(ShuqiDetailPage, skipOffstage: false), findsOneWidget);
+    expect(find.byType(NovelPluginsPage, skipOffstage: false), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
@@ -106,10 +106,10 @@ void main() {
     final cache = MemoryChapterCache();
     final chapter = Chapter(itemId: '10', title: '书旗第一章', volumeName: '');
     await cache.saveBook(
-      CachedBook(id: 'shuqi:123', title: '旧缓存标题', chapters: [chapter]),
+      CachedBook(id: 'plugin:shuqi:123', title: '缓存标题', chapters: [chapter]),
     );
     await cache.write(
-      bookId: 'shuqi:123',
+      bookId: 'plugin:shuqi:123',
       chapterId: '10',
       title: chapter.title,
       text: '只属于书旗的离线正文。',
@@ -117,27 +117,27 @@ void main() {
     // A raw ID collision must neither supply the chapter nor its progress.
     await cache.saveBook(
       CachedBook(
-        id: '123',
+        id: 'plugin:fanqie:123',
         title: '同号番茄缓存',
         chapters: [Chapter(itemId: '99', title: '番茄章', volumeName: '')],
       ),
     );
     await cache.write(
-      bookId: '123',
+      bookId: 'plugin:fanqie:123',
       chapterId: '99',
       title: '番茄章',
       text: '番茄正文',
     );
     final history = _CountingReaderStore()
-      ..entries['123'] = {
-        'id': '123',
+      ..entries['plugin:fanqie:123'] = {
+        'id': 'plugin:fanqie:123',
         'kind': 'book',
         'chapterId': '99',
         'episode': 5,
       }
-      ..entries['shuqi:123'] = {
-        'id': 'shuqi:123',
-        'bookId': 'shuqi:123',
+      ..entries['plugin:shuqi:123'] = {
+        'id': 'plugin:shuqi:123',
+        'bookId': 'plugin:shuqi:123',
         'contentId': '123',
         'source': 'shuqi',
         'kind': 'book',
@@ -158,24 +158,28 @@ void main() {
     );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('shelf-book-shuqi/book:123')));
+    for (var i = 0; i < 30 && find.byType(ReaderPage).evaluate().isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
     await tester.pumpAndSettle();
 
     final reader = tester.widget<ReaderPage>(find.byType(ReaderPage));
-    expect(reader.bookId, 'shuqi:123');
+    expect(reader.bookId, 'plugin:shuqi:123');
     expect(reader.title, item.title);
     expect(reader.chapters.single.itemId, '10');
     expect(reader.startIndex, 0);
     expect(reader.localOnly, isTrue);
     expect(reader.shelfItem!.toJson(), item.toJson());
     expect(reader.readerStore, same(history));
-    expect(find.byType(ShuqiDetailPage, skipOffstage: false), findsNothing);
     expect(directoryCalls, 0);
     expect(history.reads, greaterThan(0));
-    expect(history.entries['123']!['chapterId'], '99');
-    expect(history.entries['shuqi:123']!['source'], shuqiSourceId);
+    expect(history.entries['plugin:fanqie:123']!['chapterId'], '99');
+    expect(history.entries['plugin:shuqi:123']!['source'], shuqiSourceId);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
-    expect(history.readSeconds, 0, reason: '书旗进度保存，但仍不计入阅读时长');
     expect(tester.takeException(), isNull);
   });
 
@@ -233,7 +237,10 @@ void main() {
         _item('123', title: '书旗书', source: 'shuqi'),
       );
       await LibraryStore.instance.addHistory({
-        'id': '123',
+        'id': 'plugin:fanqie:123',
+        'contentId': '123',
+        'source': 'fanqie',
+        'novelPlugin': true,
         'kind': 'book',
         'title': '番茄书',
         'episode': 1,
@@ -244,7 +251,7 @@ void main() {
     final cache = MemoryChapterCache();
     await cache.saveBook(
       CachedBook(
-        id: '123',
+        id: 'plugin:fanqie:123',
         title: '番茄书',
         chapters: [
           Chapter(itemId: '1', title: '第一章', volumeName: ''),

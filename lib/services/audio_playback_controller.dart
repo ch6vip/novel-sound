@@ -5,6 +5,8 @@ part of '../pages/audio_page.dart';
 class _AudioPlaybackController extends ChangeNotifier
     with WidgetsBindingObserver {
   _AudioPlaybackController(this.request);
+
+  ApiClient get _api => request.novelApi ?? ApiClient.instance;
   final AudioPage request;
   bool _closed = false;
   Future<void>? _closing;
@@ -210,7 +212,11 @@ class _AudioPlaybackController extends ChangeNotifier
         request.playerFactory != null) {
       return Future.value(const AudioExtras());
     }
-    return _defaultAudioExtras(_bookId, onTones: onTones);
+    return _defaultAudioExtras(
+      _bookId,
+      onTones: onTones,
+      novelApi: request.novelApi,
+    );
   }
 
   /// Resolves 边听边读 subtitles. A book without generated speech text answers
@@ -226,7 +232,7 @@ class _AudioPlaybackController extends ChangeNotifier
     if (request.sourceLoader != null || request.playerFactory != null) {
       return Future.value(SubtitleTrack.empty);
     }
-    return ApiClient.instance.chapterTimeline(
+    return _api.chapterTimeline(
       itemId,
       toneId: toneId,
       cancel: cancel,
@@ -248,7 +254,7 @@ class _AudioPlaybackController extends ChangeNotifier
     if (request.sourceLoader != null || request.playerFactory != null) {
       return Future.value(AudioTimeTrack.empty);
     }
-    return ApiClient.instance.chapterTimePoints(
+    return _api.chapterTimePoints(
       _bookId,
       itemId,
       toneId: toneId,
@@ -355,8 +361,7 @@ class _AudioPlaybackController extends ChangeNotifier
     final history = _history.load(_bookId).catchError((Object _) => null);
     final voices = () async {
       try {
-        return await (request.voicesLoader?.call() ??
-                ApiClient.instance.audioVoices(_bookId))
+        return await (request.voicesLoader?.call() ?? _api.audioVoices(_bookId))
             .timeout(const Duration(seconds: 8));
       } catch (_) {
         return <AudioVoice>[_defaultVoice];
@@ -1180,7 +1185,7 @@ class _AudioPlaybackController extends ChangeNotifier
     String itemId,
     String toneId,
   ) => retryTransient(
-    () => ApiClient.instance
+    () => _api
         .audioSource(itemId, bookId: bookId, toneId: toneId)
         .timeout(const Duration(seconds: 30)),
     shouldRetry: isTransientNetworkFailure,
@@ -1252,7 +1257,7 @@ class _AudioPlaybackController extends ChangeNotifier
       try {
         final synthesisRequest = BackendRequest();
         unawaited(cancel.then((_) => synthesisRequest.cancel()));
-        final synth = await ApiClient.instance.withCancellation(
+        final synth = await _api.withCancellation(
           synthesisRequest,
           () => _synthesizeSubtitles(this, itemId, generation: generation),
         );
@@ -1831,9 +1836,7 @@ class _AudioPlaybackController extends ChangeNotifier
       }
     } else if (!_offline) {
       try {
-        final summary = await ApiClient.instance.chapterSummaries(_bookId, [
-          itemId,
-        ]);
+        final summary = await _api.chapterSummaries(_bookId, [itemId]);
         text = summary.forItem(itemId);
       } catch (_) {
         text = null;
@@ -1972,10 +1975,7 @@ class _AudioPlaybackController extends ChangeNotifier
   /// `/api/directory` answers per volume, and the listening page wants one
   /// flat chapter list.
   Future<List<Chapter>> _defaultDirectory(String bookId) async {
-    final volumes = await ApiClient.instance.directoryChapters(
-      bookId,
-      tab: '听书',
-    );
+    final volumes = await _api.directoryChapters(bookId, tab: '听书');
     return [for (final volume in volumes) ...volume];
   }
 

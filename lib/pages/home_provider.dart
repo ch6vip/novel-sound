@@ -10,6 +10,7 @@ import '../services/frame_stats.dart';
 import '../services/backend_transport.dart';
 import '../services/home_feed_cache.dart';
 import '../services/home_page_affinity.dart';
+import '../services/novel_plugins.dart';
 import '../services/user_facing_error.dart';
 
 typedef HomepageLoader =
@@ -379,13 +380,17 @@ class HomeNotifier extends Notifier<HomeState> {
     int? tabIndex,
     int offset = 0,
     String? sessionId,
-  }) => _indexedHomepageLoader(
-    tabType: tabType,
-    offset: offset,
-    sessionId: sessionId,
-    tabIndex: tabIndex ?? state.tabIndex,
-    lastTabIndex: _lastTabIndex,
-  );
+  }) {
+    final index = tabIndex ?? state.tabIndex;
+    final api = isPluginBookstore(index) ? novelPlugins?.fanqieApi : null;
+    return (api?.homepagePage ?? _indexedHomepageLoader)(
+      tabType: tabType,
+      offset: offset,
+      sessionId: sessionId,
+      tabIndex: index,
+      lastTabIndex: _lastTabIndex,
+    );
+  }
 
   /// 这一页能不能当成本分类的载荷（判定与日志都在 [homePageAffinity]）。
   ///
@@ -397,6 +402,11 @@ class HomeNotifier extends Notifier<HomeState> {
       HomePageAffinity.ours;
 
   final HomeFeedCache? _feedCache;
+  final NovelPluginRegistry? novelPlugins;
+  NovelPlugin? _bookstorePlugin;
+  NovelPlugin? get bookstorePlugin => _bookstorePlugin;
+  bool isPluginBookstore(int tabIndex) =>
+      novelPlugins != null && identityOf(tabIndex).kind == 'book';
   final int initialTabIndex;
 
   /// 顶栏下标的口径：`true` 表示这一页的分类条由本地 [tabs] 表驱动。
@@ -425,6 +435,7 @@ class HomeNotifier extends Notifier<HomeState> {
     CategorySearchLoader? mangaSearchLoader,
     CategorySearchLoader? manjuSearchLoader,
     HomeFeedCache? feedCache,
+    this.novelPlugins,
     this.initialTabIndex = 0,
     this.usesLocalTabs = false,
     this.resumeVideoFeed = false,
@@ -485,12 +496,18 @@ class HomeNotifier extends Notifier<HomeState> {
     String name, {
     int page = 1,
     int offset = 0,
-  }) => switch (name) {
-    '听书' => _requestAudioSearch(offset: offset),
-    '漫画' => _mangaSearchLoader(offset: offset),
-    '漫剧' => _manjuSearchLoader(offset: offset),
-    _ => _searchLoader(name, page: page),
-  };
+  }) {
+    final api = novelPlugins?.fanqieApi;
+    if (name == '小说' && api != null) {
+      return api.searchTabs(name, tabType: 3, offset: offset);
+    }
+    return switch (name) {
+      '听书' => _requestAudioSearch(offset: offset),
+      '漫画' => _mangaSearchLoader(offset: offset),
+      '漫剧' => _manjuSearchLoader(offset: offset),
+      _ => _searchLoader(name, page: page),
+    };
+  }
 
   final Map<int, _TabFeed> _feeds = {};
   int _generation = 0;
@@ -520,13 +537,37 @@ class HomeNotifier extends Notifier<HomeState> {
     // Leaving the page (or rebuilding the provider) stops whatever is in
     // flight instead of only ignoring its result. The pending snapshot write
     // dies with it: _feeds is cleared below, so there is nothing left to save.
+    _bookstorePlugin = novelPlugins?.plugin('fanqie');
+    novelPlugins?.addListener(_bookstoreChanged);
     ref.onDispose(() {
+      novelPlugins?.removeListener(_bookstoreChanged);
       _activeRequest?.cancel();
       _saveDebounce?.cancel();
     });
     _activeRequest?.cancel();
     _feeds.clear();
     return HomeState(tabIndex: initialTabIndex);
+  }
+
+  void _bookstoreChanged() {
+    final plugin = novelPlugins?.plugin('fanqie');
+    if (identical(plugin, _bookstorePlugin)) return;
+    _bookstorePlugin = plugin;
+    _feeds.removeWhere((tab, _) => isPluginBookstore(tab));
+    if (!isPluginBookstore(state.tabIndex)) return;
+
+    ++_generation;
+    _activeRequest?.cancel();
+    state = state.copyWith(
+      items: const [],
+      cells: const [],
+      clearCellsTabIndex: true,
+      isLoading: false,
+      isLoadMore: false,
+      hasMore: false,
+      clearError: true,
+    );
+    if (plugin?.hasBookstoreFeed == true) unawaited(load());
   }
 
   _TabFeed _feedFor(int tabIndex) => _feeds.putIfAbsent(tabIndex, _TabFeed.new);
@@ -542,7 +583,11 @@ class HomeNotifier extends Notifier<HomeState> {
   Future<void> load({bool manualRefresh = false}) async {
     final tabIndex = state.tabIndex;
     // The independent UGC provider owns short-story data and pagination.
-    if (identityOf(tabIndex).kind == 'ugc') return;
+    if (identityOf(tabIndex).kind == 'ugc' ||
+        (isPluginBookstore(tabIndex) &&
+            _bookstorePlugin?.hasBookstoreFeed != true)) {
+      return;
+    }
     FrameStats.mark('load start tab=$tabIndex');
     final generation = ++_generation;
     final feed = _feedFor(tabIndex)..reset();
@@ -552,7 +597,9 @@ class HomeNotifier extends Notifier<HomeState> {
     // Stale-while-revalidate: show the last rendered cards while the network
     // refresh runs. Cursors stay reset; grids replace page one, while videos
     // may append it after the resumed card.
-    final snapshot = manualRefresh ? null : _feedCache?.load(tabIndex);
+    final snapshot = manualRefresh || isPluginBookstore(tabIndex)
+        ? null
+        : _feedCache?.load(tabIndex);
     if (snapshot != null) {
       final resumeIndex = !canResume || snapshot.lastVid == null
           ? -1
@@ -669,7 +716,7 @@ class HomeNotifier extends Notifier<HomeState> {
 
   /// Restores a cached tab immediately. Incrementing the generation happens
   /// even on a cache hit, which invalidates requests started by the old tab.
-  void selectTab(int index) {
+  void selectTab(int index, {bool loadFeed = true}) {
     // 上限跟着下标口径走：走服务端表时是它下发的分类数（首页 11 个），走本地
     // 表时是本地表的长度。用错口径会把短剧页的「短剧」（本地下标 2）拦掉或
     // 放进越界下标。
@@ -701,7 +748,7 @@ class HomeNotifier extends Notifier<HomeState> {
           : cached?.hasMore ?? true,
       clearError: true,
     );
-    if (identityOf(index).kind == 'ugc') {
+    if (!loadFeed || identityOf(index).kind == 'ugc') {
       return;
     }
     // 只有「还什么都没有、且没成功落地过」才在进入时重拉。
@@ -726,7 +773,11 @@ class HomeNotifier extends Notifier<HomeState> {
 
   /// Appends the next page to the selected feed.
   Future<void> loadMore() async {
-    if (identityOf(state.tabIndex).kind == 'ugc') return;
+    if (identityOf(state.tabIndex).kind == 'ugc' ||
+        (isPluginBookstore(state.tabIndex) &&
+            _bookstorePlugin?.hasBookstoreFeed != true)) {
+      return;
+    }
     if (state.isLoading || state.isLoadMore || !state.hasMore) return;
     final tabIndex = state.tabIndex;
     final generation = _generation;
@@ -798,6 +849,7 @@ class HomeNotifier extends Notifier<HomeState> {
   /// 有播放 surface 的视频页滑动前可能还没有上报 lastVid，因此保存时用当前
   /// 列表首卡兜底；上报值已不在列表中时也回退到首卡。其他页面不写续播点。
   void _writeSnapshot(int tabIndex) {
+    if (isPluginBookstore(tabIndex)) return;
     final feed = _feeds[tabIndex];
     final cache = _feedCache;
     if (feed == null || cache == null || feed.items.isEmpty) return;
@@ -854,6 +906,9 @@ class HomeNotifier extends Notifier<HomeState> {
   }
 
   Future<_FetchedFeed> _loadInitial(int tabIndex) async {
+    if (isPluginBookstore(tabIndex) && novelPlugins?.fanqieApi == null) {
+      return _loadPluginBooks(tabIndex);
+    }
     final identity = identityOf(tabIndex);
     final name = identity.name;
     if (name == '全部') return _loadAllInitial();
@@ -1197,6 +1252,13 @@ class HomeNotifier extends Notifier<HomeState> {
   }
 
   Future<_FetchedFeed> _loadNext(int tabIndex, _TabFeed feed) async {
+    if (isPluginBookstore(tabIndex) && novelPlugins?.fanqieApi == null) {
+      return _loadPluginBooks(
+        tabIndex,
+        offset: feed.offset,
+        sessionId: feed.sessionId,
+      );
+    }
     final identity = identityOf(tabIndex);
     final name = identity.name;
     if (name == '全部') return _loadAllNext(feed);
@@ -1306,6 +1368,28 @@ class HomeNotifier extends Notifier<HomeState> {
       searchCanAdvance: progress.hasCursor,
       recommendExhausted: true,
       hasMore: progress.hasMore,
+    );
+  }
+
+  Future<_FetchedFeed> _loadPluginBooks(
+    int tabIndex, {
+    int offset = 0,
+    String? sessionId,
+  }) async {
+    final page = await novelPlugins!.bookstorePage(
+      tabIndex == 0
+          ? NovelBookstoreChannel.recommended
+          : NovelBookstoreChannel.novels,
+      offset: offset,
+      sessionId: sessionId,
+    );
+    return _FetchedFeed(
+      items: page.items,
+      nextOffset: page.nextOffset,
+      sessionId: page.sessionId,
+      searchPage: 0,
+      recommendExhausted: page.nextOffset == null,
+      hasMore: page.nextOffset != null,
     );
   }
 
@@ -1540,7 +1624,10 @@ class HomeNotifier extends Notifier<HomeState> {
 
 final homeProvider = NotifierProvider<HomeNotifier, HomeState>(
   // 首页使用本地分类，包含独立短篇流；服务端分类表没有对应的短剧/漫剧组合。
-  () => HomeNotifier(usesLocalTabs: true),
+  () => HomeNotifier(
+    usesLocalTabs: true,
+    novelPlugins: NovelPluginRegistry.instance,
+  ),
 );
 
 // Note: 底部导航的短剧目的地用第二个 HomeNotifier 实例而不是复用 homeProvider，

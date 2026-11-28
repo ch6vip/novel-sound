@@ -107,6 +107,9 @@ extension _ReaderPageMenuPlayers on _ReaderPageState {
 
   Future<void> _loadReaderTones() async {
     if (widget.localOnly ||
+        (widget.novelCapabilities != null &&
+            widget.novelCapabilities?.supports(NovelCapability.audio) ==
+                false) ||
         widget.chapters.isEmpty ||
         _readerTones != null ||
         _readerTonesRequest != null) {
@@ -120,9 +123,14 @@ extension _ReaderPageMenuPlayers on _ReaderPageState {
     _readerTonesAttempt = now;
     final request = _readerTonesRequest = BackendRequest();
     try {
-      final tones = await ApiClient.instance.withCancellation(
+      final session = widget.novelCapabilities?.audioSession(
+        widget.sourceBookId ?? widget.bookId,
+        const [],
+      );
+      final api = session?.api ?? widget.novelApi ?? ApiClient.instance;
+      final tones = await api.withCancellation(
         request,
-        () => ApiClient.instance.bookTones(widget.bookId),
+        () => api.bookTones(session?.bookId ?? widget.bookId),
       );
       if (mounted && !request.isCancelled) {
         _setState(() => _readerTones = tones);

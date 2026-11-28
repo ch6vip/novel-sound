@@ -1,3 +1,5 @@
+import '../models/media_id.dart';
+import '../models/novel_plugin_book_id.dart';
 import 'library_store.dart';
 
 /// Keeps resume reads behind pending saves from earlier reader page instances.
@@ -9,8 +11,22 @@ class ReaderHistory {
 
   Future<Map<String, dynamic>?> load(String bookId) async {
     await _writes[store];
-    return store.historyEntry(bookId);
+    final current = await store.historyEntry(bookId);
+    if (!isValidMediaId(bookId)) return current;
+    final legacy = await store.historyEntry(
+      novelPluginBookId('fanqie', bookId),
+    );
+    if (legacy == null ||
+        (current != null &&
+            (current['kind'] == null || current['kind'] == 'book') &&
+            _timestamp(current) >= _timestamp(legacy))) {
+      return current;
+    }
+    return legacy;
   }
+
+  static num _timestamp(Map<String, dynamic> record) =>
+      num.tryParse(record['time']?.toString() ?? '') ?? 0;
 
   Future<void> save(Map<String, dynamic> entry, {bool createHistory = false}) {
     final guard = ReadingDataWriteGuard(store);

@@ -9,6 +9,8 @@ extension _ReaderPageListeningLaunch on _ReaderPageState {
   /// 音频，无论偏好如何都固定系统朗读。
   bool get _defaultListenEngineIsSystem =>
       widget.localOnly ||
+      (widget.novelCapabilities != null &&
+          widget.novelCapabilities?.supports(NovelCapability.audio) == false) ||
       AudioPreferences.instance.listenEngine.value == ListenEngine.system;
 
   /// [fromPage] 从当前页第一段起播、不弹引擎面板：圆钮听书与同步胶囊
@@ -131,7 +133,14 @@ extension _ReaderPageListeningLaunch on _ReaderPageState {
         },
         startOffset: offset,
         localOnly: widget.localOnly,
-        textLoader: widget.chapterLoader,
+        useChapterCache:
+            widget.readOfflineCache ||
+            parseNovelPluginBookId(widget.bookId) != null,
+        textLoader:
+            widget.chapterLoader ??
+            (widget.novelApi == null
+                ? null
+                : (chapter) => widget.novelApi!.contentText(chapter.itemId)),
         cache: widget.chapterCache,
       );
       await _persistProgress();
@@ -258,13 +267,18 @@ extension _ReaderPageListeningLaunch on _ReaderPageState {
         reuseLive = true;
       }
       if (!keepControls) _setControlsVisible(false);
+      final audio = widget.novelCapabilities?.audioSession(
+        widget.sourceBookId ?? widget.bookId,
+        widget.chapters,
+      );
       final request = AudioPage(
+        novelApi: audio?.api ?? widget.novelApi,
         // 复用别名会话时用音频书 id：页面只是会话的视图，按会话自己的 id
         // 记账，评论/封面等读取才落对书。
-        bookId: reuseLive ? listening.bookId! : widget.bookId,
+        bookId: reuseLive ? listening.bookId! : audio?.bookId ?? widget.bookId,
         title: widget.title,
         cover: widget.cover,
-        chapters: widget.chapters,
+        chapters: audio?.chapters ?? widget.chapters,
         startIndex: chapterIndex,
         resumeSession: reuseLive,
         // 沿用正在听的那个音色：不传的话播放页只能挑默认音色，

@@ -76,19 +76,22 @@ class ReadingNow {
 
 /// The most recent book (or audiobook) in history. 推荐页以书为主，最近看过
 /// 的短剧不会顶掉这一条——直接跳过，取下一本书。
-Map<String, dynamic>? latestHistoryBook() {
+Map<String, dynamic>? latestHistoryBook({String? sourceId}) {
   final store = LibraryStore.instance;
   if (!store.isInitialized) return null;
   for (final entry in store.historySnapshot()) {
     final kind = entry['kind']?.toString() ?? 'book';
-    if (kind == 'book' || kind == 'audio') return entry;
+    if ((kind == 'book' || kind == 'audio') &&
+        (sourceId == null || historySource(entry) == sourceId)) {
+      return entry;
+    }
   }
   return null;
 }
 
 /// The book to put on the continue row, or null when there is none.
-ReadingNow? latestReadingNow() {
-  final entry = latestHistoryBook();
+ReadingNow? latestReadingNow({String? sourceId}) {
+  final entry = latestHistoryBook(sourceId: sourceId);
   return entry == null ? null : ReadingNow.fromHistory(entry);
 }
 

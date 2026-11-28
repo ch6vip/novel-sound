@@ -381,12 +381,18 @@ extension _ReaderPageProgress on _ReaderPageState {
       index: index,
     );
     final shuqiId = shuqiBookIdFromReaderId(widget.bookId);
+    final pluginBook = parseNovelPluginBookId(widget.bookId);
     final entry = {
       'id': widget.bookId,
       'kind': 'book',
       'title': widget.title,
       'bookId': widget.bookId,
       if (shuqiId != null) ...{'contentId': shuqiId, 'source': shuqiSourceId},
+      if (pluginBook != null) ...{
+        'contentId': pluginBook.bookId,
+        'source': pluginBook.source,
+        'novelPlugin': true,
+      },
       'chapterId': chapterId,
       'episode': index,
       // 总章数：书架靠「第 N/M 章」区分「读到末尾」与「全书读完」

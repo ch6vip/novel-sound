@@ -20,11 +20,12 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../models/media_item.dart';
-import '../services/api_client.dart';
 import '../services/book_txt_export.dart';
 import '../services/chapter_cache_store.dart';
 import '../services/library_store.dart';
 import '../services/shuqi_reader_source.dart';
+import '../models/novel_plugin_book_id.dart';
+import '../services/novel_plugins.dart';
 import '../widgets/app_ui/app_ui_scope.dart';
 import '../widgets/cache/cache_list_anchor.dart';
 import '../widgets/cache/cache_page_widgets.dart';
@@ -199,9 +200,15 @@ class _CachedBooksPageState extends State<CachedBooksPage> {
     }
   }
 
-  Future<List<Chapter>> _loadExportDirectory(String bookId) async {
-    final volumes = await ApiClient.instance.directoryChapters(bookId);
-    return [for (final volume in volumes) ...volume];
+  Future<NovelSource?> _exportSource(String source) async {
+    final registry = NovelPluginRegistry.instance;
+    try {
+      await registry.load();
+    } catch (_) {
+      return null;
+    }
+    if (registry.plugin(source) == null) return null;
+    return registry.source(source);
   }
 
   Future<String> _loadExportChapter(
@@ -228,21 +235,29 @@ class _CachedBooksPageState extends State<CachedBooksPage> {
     // network request after this export has been cancelled or replaced.
     if (!isActive()) throw StateError('导出已取消');
     if (cachedBody != null) return cachedBody;
-    if (shuqiId == null) {
-      return (widget.exportChapterLoader ??
-          (chapter) => ApiClient.instance.contentText(chapter.itemId))(chapter);
+    final pluginBook = parseNovelPluginBookId(book.id);
+    final sourceId =
+        pluginBook?.source ?? (shuqiId == null ? 'fanqie' : 'shuqi');
+    final bookId = pluginBook?.bookId ?? shuqiId ?? book.id;
+    final fanqieLoader = widget.exportChapterLoader;
+    final shuqiLoader = widget.exportShuqiChapterLoader;
+    if (sourceId == 'fanqie' && fanqieLoader != null) {
+      return fanqieLoader(chapter);
     }
-    return loadShuqiChapter(
-      shuqiId,
-      chapter,
-      loader: widget.exportShuqiChapterLoader,
-    );
+    if (sourceId == 'shuqi' && shuqiLoader != null) {
+      return loadShuqiChapter(bookId, chapter, loader: shuqiLoader);
+    }
+    final source = await _exportSource(sourceId);
+    if (!isActive()) throw StateError('导出已取消');
+    if (source == null) throw StateError('请导入此书源 ZIP 以补齐未缓存章节');
+    return (await source.chapter(bookId, chapter)).toCacheText();
   }
 
   /// Starts one whole-book export at a time. Its row can cancel fetching, but
   /// must wait for the platform result once saving begins.
   void _startExport(CachedBook book) {
     if (_export != null) return;
+    final pluginBook = parseNovelPluginBookId(book.id);
     final shuqiId = shuqiBookIdFromReaderId(book.id);
     if (book.id.startsWith('shuqi:') && shuqiId == null) {
       _snack('书旗缓存标识无效，请删除后重新缓存');
@@ -250,14 +265,21 @@ class _CachedBooksPageState extends State<CachedBooksPage> {
     }
     late final BookTxtExport export;
     export = BookTxtExport(
-      directoryLoader: shuqiId == null
-          ? widget.exportDirectoryLoader ?? _loadExportDirectory
-          : (_) => loadShuqiDirectory(
-              shuqiId,
-              loader: widget.exportShuqiTocLoader,
-            ),
-      // Both sources reuse only their own readable cache; a fresh TOC includes
-      // new chapters, whose requests still pass through ApiClient's funnel.
+      directoryLoader: (_) async {
+        final sourceId =
+            pluginBook?.source ?? (shuqiId == null ? 'fanqie' : 'shuqi');
+        final bookId = pluginBook?.bookId ?? shuqiId ?? book.id;
+        final fanqieLoader = widget.exportDirectoryLoader;
+        final shuqiLoader = widget.exportShuqiTocLoader;
+        if (sourceId == 'fanqie' && fanqieLoader != null) {
+          return fanqieLoader(bookId);
+        }
+        if (sourceId == 'shuqi' && shuqiLoader != null) {
+          return loadShuqiDirectory(bookId, loader: shuqiLoader);
+        }
+        final source = await _exportSource(sourceId);
+        return source == null ? book.chapters : source.directory(bookId);
+      },
       chapterLoader: (chapter) => _loadExportChapter(
         book,
         chapter,
@@ -298,8 +320,13 @@ class _CachedBooksPageState extends State<CachedBooksPage> {
     );
   }
 
-  String _sourceLabel(CachedBook book) =>
-      book.id.startsWith('shuqi:') ? '书旗' : '番茄';
+  String _sourceLabel(CachedBook book) {
+    final plugin = parseNovelPluginBookId(book.id);
+    if (plugin == null) return book.id.startsWith('shuqi:') ? '书旗' : '番茄';
+    return NovelPluginRegistry.instance.plugin(plugin.source)?.name ??
+        NovelPlugin.nativeNames[plugin.source] ??
+        plugin.source;
+  }
 
   Color _deleteColor(BuildContext context) =>
       HomePalette.of(context).eink ? Colors.black : ShelfTokens.deleteRed;

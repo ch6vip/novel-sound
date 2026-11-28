@@ -41,7 +41,14 @@ extension _ReaderJoinedContent on _ReaderPageState {
     final ideasFuture = _joinedIdeas(chapter);
     final marksFuture = _joinedMarks(chapter);
     final loaded = await _chapterText(chapter);
-    final content = ChapterContent.fromCacheText(loaded.text);
+    final ideas = await ideasFuture;
+    var text = loaded.text;
+    var content = ChapterContent.fromCacheText(text);
+    if (ideas.chapterEndIndex != null && _needsIdeaAnchors(ideas, content)) {
+      await _refreshCachedChapter(chapter);
+      text = _chapterCache[chapter.itemId] ?? text;
+      content = ChapterContent.fromCacheText(text);
+    }
     if (content.withoutLeadingTitle(chapter.title).isEmpty) {
       throw ApiException('正文为空');
     }
@@ -58,7 +65,6 @@ extension _ReaderJoinedContent on _ReaderPageState {
       replacementEngine: widget.replacementEngine,
     );
     final replacement = view.composition.replacement;
-    final ideas = await ideasFuture;
     final marks = await marksFuture;
     if (!mounted) throw StateError('Reader disposed');
     final layout = ReaderChapterLayout(
@@ -90,7 +96,7 @@ extension _ReaderJoinedContent on _ReaderPageState {
       ),
     );
     return JoinedReaderChapter(
-      loaded.text,
+      text,
       content,
       replacement,
       layout,
@@ -104,6 +110,8 @@ extension _ReaderJoinedContent on _ReaderPageState {
 
   Future<ChapterIdeas> _joinedIdeas(Chapter chapter) async {
     if (widget.localOnly ||
+        widget.novelCapabilities?.supports(NovelCapability.chapterReviews) ==
+            false ||
         widget.ideasLoader == null && widget.chapterCache != null) {
       return ChapterIdeas.empty;
     }
@@ -196,7 +204,7 @@ extension _ReaderJoinedContent on _ReaderPageState {
       loader: _loadJoinedChapter,
       onChapterComments: (index, chapter) => unawaited(
         _showIdeas(
-          focusParaIndex: chapter.ideas.paragraphs.last.paraIndex,
+          focusParaIndex: chapter.ideas.endIndex,
           sourceChapter: widget.chapters[index],
           sourceIdeas: chapter.ideas,
         ),

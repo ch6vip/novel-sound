@@ -214,12 +214,19 @@ class ChapterContent {
   bool get hasImages => blocks.any((block) => block is ChapterImage);
   Iterable<ChapterImage> get images => blocks.whereType<ChapterImage>();
 
-  /// An incomplete response is useful on a cache miss, but cannot refresh a
-  /// readable cached chapter: missing pictures may just mean a source outage.
-  ChapterContent preferCompleteCache(ChapterContent? cached) =>
-      !illustrationsChecked && cached != null && !cached.isEmpty
-      ? cached
-      : this;
+  /// Text-only responses can restore paragraph IDs to an older text cache.
+  /// A cache with illustrations or previously checked markup remains usable
+  /// until a complete response is available.
+  ChapterContent preferCompleteCache(ChapterContent? cached) {
+    if (illustrationsChecked || cached == null || cached.isEmpty) return this;
+    if (cached.illustrationsChecked ||
+        cached.hasImages ||
+        cached.paragraphIdsChecked ||
+        !blocks.whereType<ChapterParagraph>().any((p) => p.paraIndex != null)) {
+      return cached;
+    }
+    return this;
+  }
 
   bool needsImageRefresh({DateTime? now}) {
     if (!illustrationsChecked) return true;
@@ -403,7 +410,11 @@ class ChapterContent {
 
 /// Parse upstream markup once. Cached text is decoded with fromCacheText so
 /// literal tags and entities inside a novel are never interpreted a second time.
-ChapterContent parseChapterContent(String source, {String? baseUrl}) {
+ChapterContent parseChapterContent(
+  String source, {
+  String? baseUrl,
+  bool illustrationsChecked = true,
+}) {
   final blocks = <ChapterBlock>[];
   var pending = StringBuffer();
   // Upstream paragraph id currently in scope, from `<p idx="N">`.
@@ -548,6 +559,7 @@ ChapterContent parseChapterContent(String source, {String? baseUrl}) {
   flush();
   return ChapterContent(
     blocks: blocks,
+    illustrationsChecked: illustrationsChecked,
     legacyText: normalizeChapterText(
       source,
       baseUrl: baseUrl,

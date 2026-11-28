@@ -218,7 +218,10 @@ class _ShelfEntry implements ShelfProjectable {
     fraction: progress,
     chapterLabel: readingText,
     totalChapters: _totalChapterCount,
-    sourceLabel: archiveSourceLabel(item, local: isLocal),
+    sourceLabel: !isLocal && item.kind == 'book'
+        ? NovelPluginRegistry.instance.plugin(item.source)?.name ??
+              archiveSourceLabel(item, local: false)
+        : archiveSourceLabel(item, local: isLocal),
     local: isLocal,
     cached: cached,
     updated: _hasUpdate,

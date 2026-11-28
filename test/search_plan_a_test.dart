@@ -79,7 +79,7 @@ void main() {
     await tester.tap(searchSegment('书旗'));
     await tester.pumpAndSettle();
     expect(shuqiCalls, ['测试']);
-    expect(find.text('不提供评分'), findsOneWidget);
+    expect(find.text('不提供评分'), findsNothing);
     expect(requests, hasLength(before), reason: '书旗不请求番茄分类');
 
     // 书旗与番茄分类是同一行互斥分段：点「小说」回到番茄并按该分类重新
@@ -188,8 +188,8 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.search);
     await tester.pumpAndSettle();
 
-    expect(find.text('不提供评分'), findsOneWidget);
-    expect(searchScoreFilter, findsNothing);
+    expect(find.text('不提供评分'), findsNothing);
+    expect(find.text('评分不限'), findsNothing);
   });
 
   testWidgets('the result footer uses the muted color', (tester) async {

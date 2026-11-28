@@ -239,10 +239,15 @@ Rust 核心库由 `scripts/build_rust_backend.*` 生成；C 库由下一步 APK 
 ```powershell
 cd novel-sound
 flutter pub get
-# 演示只出 arm64 调试包；正式出包是双 ABI 分包，见下方说明
-flutter build apk --debug --target-platform android-arm64
-flutter build apk --release --target-platform android-arm64
+# 本地测试包只出 arm64，正式出包是双 ABI 分包，见下方说明
+flutter build apk --debug --target-platform android-arm64 --split-per-abi
+flutter build apk --release --target-platform android-arm64 --split-per-abi
 ```
+
+ARM64 调试包位于 `build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk`。
+已有 Dart 依赖缓存也应保留 Flutter 的依赖处理步骤，尤其是从新检出的目录构建时。
+Android 插件注册表 `GeneratedPluginRegistrant.java` 由 Flutter 生成。缺少该文件时，
+跳过依赖处理仍可能产出可安装的 APK，但 JNI 插件会在启动时崩溃。
 
 镜像环境（`PUB_HOSTED_URL` 指向 pub.flutter-io.cn 等）下，上面每条命令都会隐式执行 `pub get`
 并把 `pubspec.lock` 的全部 `url:` 改写成镜像地址；本地 Flutter 版本与生成该锁的版本不一致时，

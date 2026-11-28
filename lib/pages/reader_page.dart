@@ -23,7 +23,7 @@ import '../models/media_item.dart';
 import '../models/book_detail.dart';
 import 'author_page.dart';
 import '../models/shuqi_book.dart';
-import 'shuqi_detail_page.dart';
+import '../models/novel_plugin_book_id.dart';
 import '../models/reader_video_match.dart';
 import '../models/media_id.dart';
 import '../services/backend_transport.dart' show BackendRequest;
@@ -33,6 +33,7 @@ import '../widgets/reader/reader_video_button.dart';
 import '../widgets/reader/reader_listen_button.dart';
 import 'player_page.dart';
 import '../services/api_client.dart';
+import '../services/novel_plugins.dart';
 import '../services/app_theme.dart';
 import '../services/chapter_cache_store.dart';
 import '../services/chapter_request_tracker.dart';
@@ -159,6 +160,10 @@ class ReaderPage extends StatefulWidget {
   /// disk-cache switch: imported files stay local, while Shuqi uses its own
   /// loader and source-scoped encrypted automatic cache.
   final bool localOnly;
+  final bool readOfflineCache;
+  final ApiClient? novelApi;
+  final NovelSourceCapabilities? novelCapabilities;
+  final String? sourceBookId;
   final ChapterTextLoader? chapterLoader;
   final ReaderStore? readerStore;
   final ReaderBookmarkStore? bookmarkStore;
@@ -194,6 +199,10 @@ class ReaderPage extends StatefulWidget {
     required this.chapters,
     required this.startIndex,
     this.localOnly = false,
+    this.readOfflineCache = false,
+    this.novelApi,
+    this.novelCapabilities,
+    this.sourceBookId,
     this.chapterLoader,
     this.readerStore,
     this.bookmarkStore,

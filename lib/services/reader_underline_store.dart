@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:hive_ce/hive.dart';
 
+import '../models/novel_plugin_book_id.dart';
 import 'encrypted_hive.dart';
 
 /// One locally saved 划线: a paragraph the reader marked, kept on the device.
@@ -276,6 +277,29 @@ class ReaderUnderlineStore {
     _writes = operation.then<void>((_) {}, onError: (Object _) {});
     return operation;
   }
+
+  Future<void> mergeFanqiePluginUnderlines(String bookId) =>
+      _serialize((box) async {
+        final alias = novelPluginBookId('fanqie', bookId);
+        final moved = <dynamic>[];
+        for (final key in box.keys.toList()) {
+          final raw = box.get(key);
+          if (raw is! Map || raw['bookId'] != alias) continue;
+          final data = {...raw, 'bookId': bookId};
+          final newKey =
+              ReaderUnderline.fromMap(data)?.key ??
+              ReaderRangeUnderline.fromMap(data)?.key;
+          if (newKey == null) continue;
+          final existing = box.get(newKey);
+          if (existing == null || _createdAtOf(data) > _createdAtOf(existing)) {
+            await box.put(newKey, data);
+          }
+          moved.add(key);
+        }
+        if (moved.isEmpty) return;
+        await box.flush();
+        await box.deleteAll(moved);
+      }, onUnavailable: null);
 
   /// Every saved underline of one chapter, keyed by [ReaderUnderline.key].
   Future<Map<String, ReaderUnderline>> load(String bookId, String chapterId) =>

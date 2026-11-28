@@ -33,10 +33,12 @@ class UgcStoryFeed extends ConsumerStatefulWidget {
     super.key,
     required this.scrollController,
     required this.active,
+    this.api,
   });
 
   final ScrollController scrollController;
   final bool active;
+  final ApiClient? api;
 
   @override
   ConsumerState<UgcStoryFeed> createState() => _UgcStoryFeedState();
@@ -193,9 +195,10 @@ class _UgcStoryFeedState extends ConsumerState<UgcStoryFeed> {
     UgcStoryDetail? detail;
     Object? failure;
     try {
-      detail = await ApiClient.instance.withCancellation(
+      final api = widget.api ?? ApiClient.instance;
+      detail = await api.withCancellation(
         request,
-        () => ApiClient.instance.ugcStoryDetail(item.postId),
+        () => api.ugcStoryDetail(item.postId),
       );
     } catch (error) {
       failure = error;
@@ -353,11 +356,7 @@ class _UgcStoryFeedState extends ConsumerState<UgcStoryFeed> {
       ep: '',
       kind: 'book',
     );
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => DetailPage(item: relatedBook, autoOpenReader: false),
-      ),
-    );
+    await openBookDetail(context, relatedBook, allowAutoOpen: false);
   }
 
   @override

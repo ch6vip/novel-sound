@@ -116,7 +116,7 @@ fn patch_model_stream_keys(model: &mut Map<String, Value>) -> bool {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let key = crate::endpoints::video::derive_spade_content_key(&spade_a);
+        let key = crate::endpoints::media_model::derive_spade_content_key(&spade_a);
         if key.len() != 16 {
             continue;
         }
@@ -143,7 +143,8 @@ fn patch_playinfo_keys(v: &mut Value) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => continue,
         };
-        let Some(mut model) = crate::endpoints::video::decode_video_model_str(&raw_model) else {
+        let Some(mut model) = crate::endpoints::media_model::decode_video_model_str(&raw_model)
+        else {
             continue;
         };
         if !patch_model_stream_keys(&mut model) {
@@ -178,7 +179,8 @@ fn patch_encrypted_audio_keys(v: &mut Value) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => continue,
         };
-        let Some(mut model) = crate::endpoints::video::decode_video_model_str(&raw_model) else {
+        let Some(mut model) = crate::endpoints::media_model::decode_video_model_str(&raw_model)
+        else {
             continue;
         };
         if !patch_model_stream_keys(&mut model) {

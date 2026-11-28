@@ -1,6 +1,7 @@
 import 'platform_channel.dart';
 import 'desktop_platform.dart';
 import 'linux_platform.dart';
+
 import 'dart:async';
 
 import 'package:flutter/services.dart';
@@ -133,6 +134,7 @@ class SystemTtsBook {
     required this.initialContent,
     this.startOffset = 0,
     this.localOnly = false,
+    this.useChapterCache = false,
     this.textLoader,
     this.cache,
     TextReplacementSnapshot? replacementSnapshot,
@@ -157,6 +159,7 @@ class SystemTtsBook {
   final ChapterContent initialContent;
   final int startOffset;
   final bool localOnly;
+  final bool useChapterCache;
   final Future<String> Function(Chapter)? textLoader;
   final ChapterCache? cache;
   final TextReplacementSnapshot replacementSnapshot;
@@ -191,7 +194,7 @@ class SystemTtsBook {
     if (index == startIndex) return initialContent;
     final chapter = chapters[index];
     final loader = textLoader;
-    if (localOnly) {
+    if (localOnly && !useChapterCache) {
       if (loader == null) throw StateError('本地书籍正文不可用');
       return ChapterContent.fromCacheText(await loader(chapter));
     }
@@ -210,6 +213,7 @@ class SystemTtsBook {
     if (loader != null) {
       return ChapterContent.fromCacheText(await loader(chapter));
     }
+    if (localOnly) throw StateError('此章节没有缓存');
     if (request?.isCancelled ?? false) throw BackendRequestAborted('已停止朗读');
     return ApiClient.instance.withCancellation(
       request ?? BackendRequest(),

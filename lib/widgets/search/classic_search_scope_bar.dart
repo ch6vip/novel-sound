@@ -18,6 +18,7 @@ class ClassicSearchScopeBar extends StatelessWidget {
   final List<String> categories;
   final int selectedIndex;
   final bool shuqi;
+  final bool showSources;
   final ValueChanged<int> onSelectCategory;
   final ValueChanged<bool> onSelectSource;
 
@@ -26,6 +27,7 @@ class ClassicSearchScopeBar extends StatelessWidget {
     required this.categories,
     required this.selectedIndex,
     required this.shuqi,
+    this.showSources = true,
     required this.onSelectCategory,
     required this.onSelectSource,
   });
@@ -46,15 +48,16 @@ class ClassicSearchScopeBar extends StatelessWidget {
       child: Row(
         children: [
           Expanded(child: _categories(palette)),
-          Container(width: 1, height: 20, color: palette.line),
-          Padding(
-            padding: const EdgeInsets.only(left: 12, right: homeGutter),
-            child: ClassicSearchSourceSwitch(
-              shuqi: shuqi,
-              tapHeight: height,
-              onChanged: onSelectSource,
+          if (showSources) Container(width: 1, height: 20, color: palette.line),
+          if (showSources)
+            Padding(
+              padding: const EdgeInsets.only(left: 12, right: homeGutter),
+              child: ClassicSearchSourceSwitch(
+                shuqi: shuqi,
+                tapHeight: height,
+                onChanged: onSelectSource,
+              ),
             ),
-          ),
         ],
       ),
     );

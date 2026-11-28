@@ -458,6 +458,43 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('indexed fallback repairs a cached plain-text chapter', (
+      tester,
+    ) async {
+      final cache = MemoryChapterCache();
+      cache.content['book'] = {
+        'c1': ChapterContent.fromPlainText(
+          '第一章\n第一段话。\n第二段话。\n第三段话。',
+        ).toCacheText(),
+      };
+      final refreshed = Completer<String>();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ReaderPage(
+            bookId: 'book',
+            title: '测试书',
+            chapters: _chapters,
+            startIndex: 0,
+            readerStore: MemoryReaderStore(),
+            chapterCache: cache,
+            chapterLoader: (_) => refreshed.future,
+            ideasLoader: (_) async => _ideas(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ReaderParagraphBubble), findsNothing);
+      refreshed.complete(
+        parseChapterContent(_html, illustrationsChecked: false).toCacheText(),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('42'), findsOneWidget);
+      expect(find.text('7'), findsOneWidget);
+      final saved = ChapterContent.fromCacheText(cache.content['book']!['c1']!);
+      expect(saved.paragraphIdsChecked, isTrue);
+      expect(saved.illustrationsChecked, isFalse);
+    });
+
     for (final previouslyChecked in [false, true]) {
       testWidgets('old caches (paragraph ids checked: $previouslyChecked) '
           'acquire real paragraph ids and keep them on reopen', (tester) async {

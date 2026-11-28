@@ -5,7 +5,11 @@ extension _ReaderPageIdeas on _ReaderPageState {
   /// Loads the chapter's paragraph ideas. Decoration only: a failure leaves the
   /// reader fully usable with the段评 action hidden.
   Future<void> _loadIdeas(Chapter chapter, int generation) async {
-    if (widget.localOnly) return;
+    if (widget.localOnly ||
+        widget.novelCapabilities?.supports(NovelCapability.chapterReviews) ==
+            false) {
+      return;
+    }
     final loader = widget.ideasLoader;
     if (loader == null && widget.chapterCache != null) {
       // An injected cache means the caller drives its own data; do not reach
@@ -25,16 +29,13 @@ extension _ReaderPageIdeas on _ReaderPageState {
       final unchanged =
           previous?.version == chapter.version &&
           _sameChapterIdeas(previous!.ideas, ideas);
-      if (unchanged) return;
-      _setState(() {
-        _ideas = ideas;
-        ++_ideasRevision;
-      });
-      // Note: Old image-aware caches can still lack paragraph ids. Refresh
-      // only when ideas need them; never fabricate ids from display order.
-      // .agents/notes/implemented/feature/2026-09-11-reader-paragraph-bubble.md
-      if (!_chapterContent.paragraphIdsChecked &&
-          ideas.paragraphs.any((paragraph) => paragraph.showsBubble)) {
+      if (!unchanged) {
+        _setState(() {
+          _ideas = ideas;
+          ++_ideasRevision;
+        });
+      }
+      if (_needsIdeaAnchors(ideas, _chapterContent)) {
         unawaited(_refreshCachedChapter(chapter));
       }
     } catch (_) {
@@ -42,6 +43,14 @@ extension _ReaderPageIdeas on _ReaderPageState {
       // as well as Exception: ideas are decoration, not a page-level failure.
     }
   }
+
+  bool _needsIdeaAnchors(ChapterIdeas ideas, ChapterContent content) =>
+      ideas.hasInlineIdeas &&
+      (!content.paragraphIdsChecked ||
+          (ideas.chapterEndIndex != null &&
+              !content.blocks.whereType<ChapterParagraph>().any(
+                (paragraph) => paragraph.paraIndex != null,
+              )));
 
   /// The in-text paragraph-comment bubble, built during layout so it can be
   /// measured as a placeholder at the end of the paragraph.
@@ -79,6 +88,7 @@ extension _ReaderPageIdeas on _ReaderPageState {
     if (ideaSnapshot.isEmpty) return;
     _setControlsVisible(false);
     final chapter = sourceChapter ?? widget.chapters[_index];
+    final replyLoader = _ideasReplyLoader(chapter);
     // Keep immersive on while the sheet is open (#57): the sheet pushes a
     // route, which would otherwise release the system bars. The flag is
     // read by [_syncSystemBars] when the route change lands.
@@ -125,7 +135,11 @@ extension _ReaderPageIdeas on _ReaderPageState {
             },
             // 回复按需展开（issue #95）。与段评正文同一套「注入即离线」
             // 约定：调用方自己提供数据时不接网络，也就不给可点的回复入口。
-            replyLoader: _ideasReplyLoader(),
+            replyLoader: replyLoader,
+            loadMoreReplies:
+                widget.novelCapabilities?.canPageCommentReplies == true
+                ? replyLoader
+                : null,
           ),
         ),
       );
@@ -150,7 +164,11 @@ extension _ReaderPageIdeas on _ReaderPageState {
 
   /// Default idea fetch and comment resolution; see [ReaderPage.ideasLoader].
   Future<ChapterIdeas> _defaultIdeas(String itemId) =>
-      ApiClient.instance.chapterIdeas(itemId);
+      widget.novelCapabilities?.chapterReviews(
+        widget.sourceBookId ?? widget.bookId,
+        itemId,
+      ) ??
+      (widget.novelApi ?? ApiClient.instance).chapterIdeas(itemId);
 
   /// Loads one paragraph's comments.
   ///
@@ -163,7 +181,17 @@ extension _ReaderPageIdeas on _ReaderPageState {
     String ideaVersion,
     String? cursor,
   ) {
-    return ApiClient.instance.paragraphComments(
+    final capability = widget.novelCapabilities;
+    if (capability != null) {
+      return capability.paragraphReviews(
+        widget.sourceBookId ?? widget.bookId,
+        chapter.itemId,
+        index: paragraph.paraIndex,
+        version: chapter.version.isNotEmpty ? chapter.version : ideaVersion,
+        cursor: cursor,
+      );
+    }
+    return (widget.novelApi ?? ApiClient.instance).paragraphComments(
       widget.bookId,
       chapter.itemId,
       itemVersion: chapter.version.isNotEmpty ? chapter.version : ideaVersion,
@@ -177,20 +205,31 @@ extension _ReaderPageIdeas on _ReaderPageState {
   /// Null when the caller injected its own comment data or when a chapter
   /// cache was injected (both mark an offline caller), which keeps the reply
   /// counter a plain read-only number for them.
-  Future<CommentReplyPage> Function(String commentId)? _ideasReplyLoader() {
+  Future<CommentReplyPage> Function(String commentId, [String? cursor])?
+  _ideasReplyLoader(Chapter chapter) {
     if (widget.commentResolver != null ||
         widget.ideasLoader != null ||
         widget.chapterCache != null) {
       return null;
     }
     if (widget.bookId.isEmpty) return null;
-    return (commentId) => ApiClient.instance.commentReplies(
-      widget.bookId,
-      commentId,
-      groupId: widget.bookId,
-      // 段评在 503 命名空间，书评是 501；用错会拿到空列表。
-      commentSource: 503,
-    );
+    if (widget.novelCapabilities case final capability?) {
+      if (!capability.supports(NovelCapability.commentReplies)) return null;
+      return (id, [cursor]) => capability.commentReplies(
+        widget.sourceBookId ?? widget.bookId,
+        id,
+        chapterId: chapter.itemId,
+        cursor: cursor,
+      );
+    }
+    return (commentId, [cursor]) =>
+        (widget.novelApi ?? ApiClient.instance).commentReplies(
+          widget.bookId,
+          commentId,
+          groupId: widget.bookId,
+          // 段评在 503 命名空间，书评是 501；用错会拿到空列表。
+          commentSource: 503,
+        );
   }
 }
 
@@ -200,6 +239,7 @@ extension _ReaderPageIdeas on _ReaderPageState {
 bool _sameChapterIdeas(ChapterIdeas a, ChapterIdeas b) {
   if (identical(a, b)) return true;
   if (a.itemVersion != b.itemVersion ||
+      a.chapterEndIndex != b.chapterEndIndex ||
       a.paragraphs.length != b.paragraphs.length) {
     return false;
   }

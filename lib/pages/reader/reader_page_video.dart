@@ -11,6 +11,8 @@ extension _ReaderPageVideo on _ReaderPageState {
     if (!DramaFeaturePreferences.instance.enabled.value ||
         !supportsVideoPlayback ||
         widget.localOnly ||
+        widget.novelCapabilities?.supports(NovelCapability.adaptation) ==
+            false ||
         widget.chapters.isEmpty ||
         !_preferencesReady ||
         !_preferences.showVideoButton ||
@@ -26,10 +28,17 @@ extension _ReaderPageVideo on _ReaderPageState {
     _videoMatchAttempt = now;
     final request = _videoMatchRequest = BackendRequest();
     try {
-      final match = await ApiClient.instance.withCancellation(
-        request,
-        () => ApiClient.instance.readerVideoMatch(widget.bookId),
-      );
+      final match = await (widget.novelApi ?? ApiClient.instance)
+          .withCancellation(
+            request,
+            () =>
+                widget.novelCapabilities?.adaptation(
+                  widget.sourceBookId ?? widget.bookId,
+                ) ??
+                (widget.novelApi ?? ApiClient.instance).readerVideoMatch(
+                  widget.bookId,
+                ),
+          );
       if (mounted && !request.isCancelled) {
         _setState(() => _videoMatch = match);
       }

@@ -1,3 +1,4 @@
+import 'novel_plugins.dart';
 import 'platform_channel.dart';
 import 'package:flutter/services.dart';
 
@@ -11,6 +12,7 @@ class FanqieHistoryImportService {
   static const _files = AppMethodChannel('fqapp/library_backup');
 
   Future<FanqieHistoryPreview?> loginAndFetch(BackendRequest request) async {
+    await ensureNovelAccountImport();
     final cookie = await _account.invokeMethod<String>('login');
     if (request.isCancelled) throw BackendRequestAborted('请求已取消');
     if (cookie == null || cookie.isEmpty) return null;

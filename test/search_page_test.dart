@@ -59,61 +59,6 @@ void main() {
     },
   );
 
-  testWidgets(
-    'rating-empty pages keep manual continuation at upstream cursors',
-    (tester) async {
-      // The 9-point threshold is in place before the search, as a restored
-      // preference (the filter control sits on the results heading).
-      SharedPreferences.setMockInitialValues({
-        'search_list_view': false,
-        'search_minimum_score': 9.0,
-      });
-      final offsets = <int>[];
-      await tester.pumpWidget(
-        MaterialApp(
-          home: SearchPage(
-            searchLoader:
-                (query, {required int tabType, required int offset}) async {
-                  offsets.add(offset);
-                  return [
-                    SearchTab(
-                      title: '综合',
-                      items: switch (offset) {
-                        0 => [_item('low', '低分作品', score: 8.2)],
-                        14 => [_item('unknown', '未评分作品')],
-                        _ => [_item('high', '高分作品', score: 9.3)],
-                      },
-                      hasMore: offset < 27,
-                      nextOffset: offset == 0 ? 14 : 27,
-                    ),
-                  ];
-                },
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), '评分');
-      await tester.testTextInput.receiveAction(TextInputAction.search);
-      await tester.pumpAndSettle();
-      expect(offsets, [0]);
-      expect(searchResultTiles, findsNothing);
-      await tester.tap(find.text(searchLoadMore));
-      await tester.pumpAndSettle();
-      expect(offsets, [0, 14]);
-      expect(searchGridTiles, findsNothing);
-      await tester.tap(find.text(searchLoadMore));
-      await tester.pumpAndSettle();
-      expect(offsets, [0, 14, 27]);
-      expect(find.text('高分作品'), findsOneWidget);
-      // The ported tile shows the score in its caption line.
-      expect(find.textContaining('9.3分'), findsOneWidget);
-      expect(find.text(searchEndOfResults), findsOneWidget);
-      await selectSearchScore(tester, '评分不限');
-      expect(_gridCount(tester), 3);
-      expect(offsets, [0, 14, 27]);
-    },
-  );
-
   testWidgets('cover-free list reuses results and persists on reopening', (
     tester,
   ) async {
@@ -152,39 +97,6 @@ void main() {
     expect(searchGridTiles, findsNothing);
     expect(find.text('列表作品'), findsOneWidget);
     expect(find.byTooltip('切换为封面视图'), findsOneWidget);
-  });
-
-  testWidgets('the rating threshold survives reopening the page', (
-    tester,
-  ) async {
-    Future<List<SearchTab>> loader(
-      String query, {
-      required int tabType,
-      required int offset,
-    }) async => [
-      SearchTab(
-        title: '综合',
-        items: [_item('low', '低分作品', score: 8.2)],
-        hasMore: false,
-      ),
-    ];
-
-    await tester.pumpWidget(_app(loader));
-    await tester.pumpAndSettle();
-    await selectSearchScore(tester, '9 分以上');
-    expect(
-      (await SharedPreferences.getInstance()).getDouble('search_minimum_score'),
-      9,
-    );
-
-    // Reopening is the reported symptom: the dropdown used to snap back to
-    // 「评分不限」 and the filter the viewer picked was silently dropped.
-    await tester.pumpWidget(const SizedBox());
-    await tester.pumpWidget(_app(loader));
-    await tester.pumpAndSettle();
-    // 8.2 is below the restored 9-point threshold, so it stays filtered out.
-    expect(searchScoreValue(tester), 9);
-    expect(searchResultTiles, findsNothing);
   });
 
   testWidgets('list and grid captions show the work length', (tester) async {

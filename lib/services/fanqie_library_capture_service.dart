@@ -1,3 +1,4 @@
+import 'novel_plugins.dart';
 import 'platform_channel.dart';
 import 'dart:convert';
 
@@ -17,6 +18,7 @@ class FanqieLibraryCaptureService {
     bool? dark,
     bool eink = false,
   }) async {
+    await ensureNovelAccountImport();
     final cookie = await _account.invokeMethod<String>('login', {
       'dark': dark,
       'eink': eink,

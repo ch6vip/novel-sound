@@ -181,6 +181,8 @@ pub(crate) async fn init_core(
     // it must never block or fail startup.
     crate::endpoints::video::migrate_plaintext_video_cache(&src_dir);
 
+    #[cfg(all(any(windows, target_os = "android"), feature = "app"))]
+    let is_mock = mock_origin.is_some();
     let pool = match mock_origin.as_ref() {
         Some(origin) => DevicePool::with_mock_origin(&pool_path, origin.clone()).await?,
         None => DevicePool::for_runtime(&pool_path).await?,
@@ -202,6 +204,15 @@ pub(crate) async fn init_core(
         src_dir: src_dir.to_string_lossy().into_owned(),
         filters,
     });
+    #[cfg(all(any(windows, target_os = "android"), feature = "app"))]
+    let server = {
+        let mut server = Server::new(ctx);
+        if !is_mock {
+            server.novel_root = root.parent().map(|dir| dir.join("novel-wasm"));
+        }
+        Arc::new(server)
+    };
+    #[cfg(not(all(any(windows, target_os = "android"), feature = "app")))]
     let server = Arc::new(Server::new(ctx));
 
     // `port == 0` binds an ephemeral loopback port (host tests and any caller
@@ -261,12 +272,30 @@ pub async fn shutdown() -> Result<(), String> {
     Ok(())
 }
 
-/// `"running"` or `"starting"`.
-///
-/// The three-value `failed: <message>` shape this used to advertise (inherited
-/// from the Kotlin/JNI bridge) was never reachable: a failed start travels back
-/// through `init_android`'s `Result`, so `status()` only ever observes a live
-/// core or none at all.
+/// Runs ZIP management and source calls on the shared Android and Windows host.
+pub async fn novel_zip_operate(
+    support_dir: String,
+    action: String,
+    arguments: String,
+    archive: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    #[cfg(any(windows, target_os = "android"))]
+    {
+        let root = std::path::PathBuf::from(support_dir).join("novel-wasm");
+        return tokio::task::spawn_blocking(move || {
+            crate::novel_wasm::operate(&root, &action, &arguments, &archive)
+        })
+        .await
+        .map_err(|_| "书源运行环境不可用".to_string())?;
+    }
+    #[cfg(not(any(windows, target_os = "android")))]
+    {
+        let _ = (support_dir, action, arguments, archive);
+        Err("当前平台无法运行书源 ZIP".into())
+    }
+}
+
+/// Returns `"running"` when the core is live and `"starting"` otherwise.
 pub async fn status() -> String {
     let guard = CORE.read().await;
     match guard.as_ref() {

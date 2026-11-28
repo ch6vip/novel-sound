@@ -548,9 +548,10 @@ class ApiClient {
     int page = 1,
     int? tabType,
     int? offset,
+    bool pluginMedia = false,
   }) async {
     final searchOffset = offset ?? (page > 1 ? page - 1 : 0) * 10;
-    final url = _url('/api/v1/search', {
+    final url = _url(pluginMedia ? '/api/v1/search/media' : '/api/v1/search', {
       'query': query,
       if (tabType != null) 'tab_type': '$tabType',
       'offset': '${searchOffset < 0 ? 0 : searchOffset}',
@@ -1697,7 +1698,7 @@ class ApiClient {
     final bodyBytes = r.bodyBytes;
     return Isolate.run(() {
       final payload = _decodeEnvelope(statusCode, bodyBytes);
-      return _extractChapterText(payload);
+      return _extractChapterBody(payload);
     });
   }
 
@@ -1737,14 +1738,28 @@ class ApiClient {
       // still gets a real attempt), keeping the worst case near one timeout
       // instead of two.
       final remaining = _timeout - stopwatch.elapsed;
-      final text = await contentText(
-        itemId,
+      final response = await _get(
+        _contentUrl(itemId, tab: '小说'),
         timeout: remaining > const Duration(seconds: 5)
             ? remaining
             : const Duration(seconds: 5),
       );
-      if (text.trim().isEmpty) throw const ApiException('正文为空');
-      return ChapterContent.fromPlainText(text);
+      final status = response.statusCode;
+      final bytes = response.bodyBytes;
+      final baseUrl = _resourceBase;
+      return Isolate.run(() {
+        final markup = _extractChapterBody(
+          _decodeEnvelope(status, bytes),
+          keepMarkup: true,
+        );
+        final content = parseChapterContent(
+          markup,
+          baseUrl: baseUrl,
+          illustrationsChecked: false,
+        );
+        if (content.isEmpty) throw const ApiException('正文为空');
+        return content;
+      });
     }
   }
 
@@ -1977,6 +1992,7 @@ class ApiClient {
     String? sessionId,
     int? tabIndex,
     int? lastTabIndex,
+    bool pluginMedia = false,
   }) async {
     // 翻页时第一段只是用来开 cell 的：它的游标和视频流不是一回事，而且把第二段
     // 的 session 再传给 tab 接口会被上游拒掉（客户端表现为 SERVICE_ERROR）。所以
@@ -2001,6 +2017,7 @@ class ApiClient {
         sessionId,
         tabIndex: tabIndex,
         lastTabIndex: lastTabIndex,
+        pluginMedia: pluginMedia,
       ),
     );
     final statusCode = r.statusCode;
@@ -2202,17 +2219,21 @@ class ApiClient {
     String? sessionId, {
     int? tabIndex,
     int? lastTabIndex,
-  }) => _url('/api/v1/recommend/homepage', {
-    'tab_type': '$tabType',
-    'offset': '$offset',
-    // 上游按 `tab_index` 决定回哪个 tab 的 `cell_data`；只带 `tab_type` 时
-    // 后端补 0，等于永远要推荐流的区块（「听书」会显示推荐榜）。官方请求
-    // 模型里 `tabIndex`/`lastTabIndex` 都是正式字段
-    // （J:rpc/model/BookstoreTabRequest.java:130,182）。
-    if (tabIndex != null) 'tab_index': '$tabIndex',
-    if (lastTabIndex != null) 'last_tab_index': '$lastTabIndex',
-    if (sessionId != null && sessionId.isNotEmpty) 'session_id': sessionId,
-  });
+    bool pluginMedia = false,
+  }) => _url(
+    pluginMedia ? '/api/v1/recommend/media-home' : '/api/v1/recommend/homepage',
+    {
+      'tab_type': '$tabType',
+      'offset': '$offset',
+      // 上游按 `tab_index` 决定回哪个 tab 的 `cell_data`；只带 `tab_type` 时
+      // 后端补 0，等于永远要推荐流的区块（「听书」会显示推荐榜）。官方请求
+      // 模型里 `tabIndex`/`lastTabIndex` 都是正式字段
+      // （J:rpc/model/BookstoreTabRequest.java:130,182）。
+      if (tabIndex != null) 'tab_index': '$tabIndex',
+      if (lastTabIndex != null) 'last_tab_index': '$lastTabIndex',
+      if (sessionId != null && sessionId.isNotEmpty) 'session_id': sessionId,
+    },
+  );
 
   /// Health check.
   Future<bool> health() async {
@@ -2368,14 +2389,17 @@ AudioTimeTrack _parseAudioTimeTrackPayload(
   throw const FormatException('时间轴响应缺少可识别字段');
 }
 
-String _extractChapterText(Map<String, dynamic> payload) {
+String _extractChapterBody(
+  Map<String, dynamic> payload, {
+  bool keepMarkup = false,
+}) {
   String visit(dynamic value, [int depth = 0]) {
     if (depth > 7 || value == null) return '';
     if (value is Map) {
       for (final key in ['content', 'text', 'article_content', 'body']) {
         final candidate = value[key];
         if (candidate is String && candidate.trim().isNotEmpty) {
-          return normalizeChapterText(candidate);
+          return keepMarkup ? candidate : normalizeChapterText(candidate);
         }
       }
       for (final nested in value.values) {

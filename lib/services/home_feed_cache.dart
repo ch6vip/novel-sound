@@ -106,12 +106,23 @@ class HomeFeedCache {
     }
   }
 
-  HomeFeedSnapshot? load(int tabIndex) {
+  HomeFeedSnapshot? load(int tabIndex) => _load('$tabIndex');
+
+  HomeFeedSnapshot? loadPlugin(
+    String source,
+    String publisher,
+    String channel,
+  ) => _load(_pluginKey(source, publisher, channel));
+
+  static String _pluginKey(String source, String publisher, String channel) =>
+      'plugin:$source:$publisher:$channel';
+
+  HomeFeedSnapshot? _load(String key) {
     final box = _box;
     if (box == null || !box.isOpen) return null;
     final Object? raw;
     try {
-      raw = box.get('$tabIndex');
+      raw = box.get(key);
     } catch (_) {
       return null;
     }
@@ -172,11 +183,38 @@ class HomeFeedCache {
     required bool hasMore,
     String? lastVid,
     List<HomeCell> cells = const [],
+  }) => _save(
+    '$tabIndex',
+    items,
+    hasMore: hasMore,
+    lastVid: lastVid,
+    cells: cells,
+  );
+
+  Future<void> savePlugin(
+    String source,
+    String publisher,
+    String channel,
+    List<MediaItem> items, {
+    List<HomeCell> cells = const [],
+  }) => _save(
+    _pluginKey(source, publisher, channel),
+    items,
+    hasMore: false,
+    cells: cells,
+  );
+
+  Future<void> _save(
+    String key,
+    List<MediaItem> items, {
+    required bool hasMore,
+    String? lastVid,
+    required List<HomeCell> cells,
   }) async {
     if (!hiveReady || items.isEmpty) return;
     try {
       final box = await _ensureBox();
-      await box.put('$tabIndex', {
+      await box.put(key, {
         'v': _recordVersion,
         'savedAt': DateTime.now().millisecondsSinceEpoch,
         'hasMore': hasMore,

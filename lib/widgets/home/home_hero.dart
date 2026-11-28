@@ -40,6 +40,7 @@ class HomeHero extends StatefulWidget {
   static const String categoryLabel = '分类';
 
   final VoidCallback onSearch;
+  final Widget? leading;
 
   /// 右上角「分类」入口。null 时不占位（与官方 `i_y` gone 一致）。
   final VoidCallback? onCategory;
@@ -51,6 +52,7 @@ class HomeHero extends StatefulWidget {
   const HomeHero({
     super.key,
     required this.onSearch,
+    this.leading,
     this.onCategory,
     this.cueLoader,
   });
@@ -121,6 +123,10 @@ class _HomeHeroState extends State<HomeHero> {
           constraints: const BoxConstraints(maxWidth: HomeHero.maxToolbarWidth),
           child: Row(
             children: [
+              if (widget.leading case final leading?) ...[
+                leading,
+                const SizedBox(width: 8),
+              ],
               Expanded(
                 child: HomePressable(
                   key: const Key('home_search_button'),
@@ -151,7 +157,7 @@ class _HomeHeroState extends State<HomeHero> {
                 ),
               ),
               if (widget.onCategory != null) ...[
-                const SizedBox(width: 16),
+                SizedBox(width: widget.leading == null ? 16 : 8),
                 _categoryPill(palette),
               ],
             ],

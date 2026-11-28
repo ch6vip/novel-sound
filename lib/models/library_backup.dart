@@ -6,6 +6,7 @@ import '../services/shelf_store.dart';
 import 'media_item.dart';
 import 'shelf_identity.dart';
 import 'shuqi_book.dart';
+import 'novel_plugin_book_id.dart';
 
 /// A portable allowlist, never a dump of Hive boxes or device preferences.
 // Note: 范围、合并规则与非事务恢复见
@@ -210,10 +211,13 @@ class LibraryBackup {
     for (final value in _list(raw['history'])) {
       final record = _map(value);
       final source = _historySource(record);
-      if (source != ShelfIdentity.fanqie && source != shuqiSourceId) {
+      final novelPlugin = record['novelPlugin'] == true;
+      if (source != ShelfIdentity.fanqie &&
+          source != shuqiSourceId &&
+          !novelPlugin) {
         throw const FormatException('备份中的历史来源不受支持');
       }
-      if (source != ShelfIdentity.fanqie && version != 3) {
+      if ((source != ShelfIdentity.fanqie || novelPlugin) && version != 3) {
         throw const FormatException('旧版备份不能携带来源限定的历史进度');
       }
       final clean = _common(record);
@@ -222,7 +226,15 @@ class LibraryBackup {
           clean[key] = _id(record[key]);
         }
       }
-      if (source == shuqiSourceId) {
+      if (novelPlugin) {
+        if (clean['kind'] != 'book' ||
+            (clean['bookId'] ?? clean['id']) != clean['id']) {
+          throw const FormatException('备份中的插件书目进度标识无效');
+        }
+        clean['novelPlugin'] = true;
+        clean['source'] = source;
+        clean['bookId'] = clean['id'];
+      } else if (source == shuqiSourceId) {
         final id = clean['id'] as String;
         final bookId = clean['bookId'] as String? ?? id;
         if (clean['kind'] != 'book' ||
@@ -353,7 +365,9 @@ class LibraryBackup {
 
   static int _versionFor(List<Map<String, dynamic>> history, String? aiData) {
     final sourceQualified = history.any(
-      (record) => _historySource(record) != ShelfIdentity.fanqie,
+      (record) =>
+          _historySource(record) != ShelfIdentity.fanqie ||
+          record['novelPlugin'] == true,
     );
     return sourceQualified ? 3 : (aiData == null ? 1 : 2);
   }
@@ -380,9 +394,10 @@ class LibraryBackup {
     if (storedBookId is String && storedBookId.isNotEmpty) {
       final prefix = '$source:';
       result['bookId'] =
-          source != ShelfIdentity.fanqie && storedBookId.startsWith(prefix)
-          ? storedBookId.substring(prefix.length)
-          : storedBookId;
+          parseNovelPluginBookId(storedBookId)?.bookId ??
+          (source != ShelfIdentity.fanqie && storedBookId.startsWith(prefix)
+              ? storedBookId.substring(prefix.length)
+              : storedBookId);
     }
     return result;
   }

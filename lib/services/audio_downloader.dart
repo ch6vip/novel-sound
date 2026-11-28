@@ -13,6 +13,9 @@ import 'download_resume_store.dart';
 enum AudioDownloadStatus { waiting, downloading, paused, completed, failed }
 
 /// 一个听书音频下载任务的不可变快照：弹层与管理界面都按它渲染。
+typedef AudioDownloadSource =
+    Future<AudioSource> Function(String bookId, String itemId, String toneId);
+
 @immutable
 class AudioDownloadTask {
   const AudioDownloadTask({
@@ -113,6 +116,7 @@ class AudioDownloader extends ValueNotifier<List<AudioDownloadTask>> {
   Future<void> enqueue({
     required CachedAudioBook book,
     required List<Chapter> chapters,
+    AudioDownloadSource? source,
   }) async {
     if (chapters.isEmpty) return;
     if (book.bookId.isEmpty) throw ArgumentError('Empty book id');
@@ -149,6 +153,7 @@ class AudioDownloader extends ValueNotifier<List<AudioDownloadTask>> {
           _resumeTask(task);
         }
       }
+      if (source != null) task.source = source;
       pending.add((key, task));
     }
     _publish();
@@ -538,7 +543,7 @@ class AudioDownloader extends ValueNotifier<List<AudioDownloadTask>> {
         while (true) {
           _check(key, run);
           try {
-            final source = await _resolve(
+            final source = await (task.source ?? _resolve)(
               task.snapshot.bookId,
               run.key.itemId,
               run.key.toneId,
@@ -831,10 +836,20 @@ class AudioDownloader extends ValueNotifier<List<AudioDownloadTask>> {
     String bookId,
     String itemId,
     String toneId,
-  ) => ApiClient.instance.audioSource(itemId, bookId: bookId, toneId: toneId);
+  ) {
+    if (bookId.startsWith('plugin_') || itemId.startsWith('plugin_')) {
+      throw const FormatException('请从原书源重新打开书籍并继续下载');
+    }
+    return ApiClient.instance.audioSource(
+      itemId,
+      bookId: bookId,
+      toneId: toneId,
+    );
+  }
 }
 
 class _MutableTask {
+  AudioDownloadSource? source;
   _MutableTask(this.snapshot, this.catalogue);
   AudioDownloadTask snapshot;
   final CachedAudioBook catalogue;

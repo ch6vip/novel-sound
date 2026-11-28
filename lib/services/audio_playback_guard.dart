@@ -321,7 +321,7 @@ Future<SubtitleTrack?> _synthesizeSubtitles(
   if (duration <= Duration.zero) return null;
   final String text;
   try {
-    text = await ApiClient.instance.contentText(itemId);
+    text = await c._api.contentText(itemId);
   } catch (_) {
     return null;
   }

@@ -25,7 +25,7 @@ extension _DetailPageClassic on _DetailPageState {
           enabled: _supported && !_loading && _allChapters.isNotEmpty,
           actionsEnabled: _supported && _isBook,
           onRead: () => unawaited(_openLastPosition()),
-          onListen: _isBook ? () => unawaited(_openListening()) : null,
+          onListen: _canListen ? () => unawaited(_openListening()) : null,
           onDownload: _isBook ? () => unawaited(_showDownloadSheet()) : null,
           download: _isBook ? _downloadProgress : null,
         ),

@@ -30,7 +30,9 @@ import 'search_page.dart';
 ///
 /// 数据一次 GET 一个频道（`category_tab` 不同瓦片不同）。
 class CategoryPage extends StatefulWidget {
-  const CategoryPage({super.key, this.loader});
+  const CategoryPage({super.key, this.loader, this.sourceId});
+
+  final String? sourceId;
 
   /// 数据源注入（生产默认 [ApiClient.categoryFront]；测试替换，同
   /// [SearchPage] 的 loader 规矩——页测不落网络）。
@@ -214,6 +216,14 @@ class _CategoryPageState extends State<CategoryPage> {
   }
 
   void _openSearch({String? query, String? tag}) {
+    if (widget.sourceId case final source?) {
+      openNovelPluginSearch(
+        context,
+        query: query ?? tag ?? '',
+        sourceId: source,
+      );
+      return;
+    }
     final category = switch (_tabValue) {
       3 => SearchCategory.audio,
       5 => SearchCategory.manga,
