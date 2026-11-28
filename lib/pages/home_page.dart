@@ -8,6 +8,7 @@ import '../models/home_cell.dart';
 import '../models/search_discovery.dart';
 import '../models/media_item.dart';
 import '../services/novel_plugins.dart';
+import '../services/api_client.dart';
 import '../services/app_log.dart';
 import '../services/app_style_tokens.dart';
 import '../services/app_theme_style.dart';
@@ -975,9 +976,6 @@ class _HomePageState extends ConsumerState<HomePage> {
     );
   }
 
-  /// 官方搜索行右上角的「分类」入口（`alx.xml` `i_y`）。官方点它走
-  /// `turnToCategoryTab` → `//category` 路由（`BookCategoryActivity` →
-  /// `KmpCategoryFragment`）；这里打开同结构的分类页。
   ApiClient? get _discoveryApi {
     final registry = NovelPluginRegistry.instance;
     return registry.supportsZipPackages
@@ -985,6 +983,9 @@ class _HomePageState extends ConsumerState<HomePage> {
         : ApiClient.instance;
   }
 
+  /// 官方搜索行右上角的「分类」入口（`alx.xml` `i_y`）。官方点它走
+  /// `turnToCategoryTab` → `//category` 路由（`BookCategoryActivity` →
+  /// `KmpCategoryFragment`）；这里打开同结构的分类页。
   void _openCategory() {
     final api = _discoveryApi;
     if (api == null) {
